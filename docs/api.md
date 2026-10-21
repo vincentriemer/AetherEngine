@@ -1380,3 +1380,21 @@ Public for the CLI, the test suite, or a diagnostic overlay, and outside the sha
 - **Dolby Vision Profile 7 FEL tooling** (`@_spi(Diagnostics)`): `FelProbeResult` / `felDecodeProbe` (`aetherctl feltest`) and `felResidualEnabled` (`aetherctl play --cycle-el`), which exist only with the `DualLayerDolbyVision` trait, `DoviRpuSurvey` / `DoviRpuSurveyResult` / `DoviRpuFrameSurvey` / `doviRpuSurvey` (`aetherctl dvsurvey`), and, in `DEBUG` builds with the `DualLayerDolbyVision` trait only, `armDolbyVisionPinTest` / `dolbyVisionPinIsArmed` / `dolbyVisionPinIsActive` (`aetherctl play --dv-pin`). Hosts import none of them; the host surface of the FEL route is `LoadOptions.preferDualLayerDolbyVision` and, in `SessionReloadRefusal`, the new case `.dualLayerRouteNeedsFreshLoad`. See [Dolby Vision FEL](dolby-vision-fel.md) and [CLI](cli.md).
 - **`HLSLiveIngestReader`'s internals** (`terminalError`, `upstreamTargetDuration`, `observedLiveCadenceSeconds`, `closedLiveCadenceSeconds`, `upstreamSegmentDurationSeconds`, `companionAudioReader`): fixture and diagnostic reads. The last two are the closed evidence the served TARGETDURATION is sealed from (AE#447); `upstreamTargetDuration` is the upstream's own claim, reported in the seal line and derived from nowhere.
 - **`SubtitleChannel`**: the primary / secondary selector on the engine's internal subtitle routing. No public signature takes one; a host picks the channel by calling the primary or the secondary method.
+
+### Native audio renditions
+
+For finite, seekable container sources, set `LoadOptions.nativeAudioTrackNames` to nonempty
+container-indexed names before loading. The engine validates indices against the container and
+publishes real audio-only HLS renditions for its audio tracks. The default empty dictionary keeps
+legacy muxed audio. Names describe source formats, not receiver output; HLS localization retains
+same-language distinctions in AVKit. AVKit owns selection; a host must forward an audible option's
+`dev.atvplayer.source-audio.s<index>` characteristic to `selectAudioTrack(index:)` as soon as it is
+selected. Do not forward choices from a replaced item.
+
+Manifest/name requests do not create decoders. Audio requests activate one serialized, cancellable
+pipeline, reuse the existing stream-copy/APAC/bed cascade, and share the video segment plan.
+Video and subtitles keep their current item/timeline. Rapid picks supersede pending work; an old
+pipeline must finish before a replacement starts. `LoadOptions.nativeAudioLosslessStreamIndices`
+keeps recovered tracks on their lossless bed through a rebuild. The host owns recovery limits.
+Custom sources must support `IOReader.makeIndependentReader()`; live/forward-only sources do not
+support this option. Physical Apple TV acceptance remains separate from synthetic tests.

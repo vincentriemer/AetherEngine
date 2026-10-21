@@ -288,8 +288,9 @@ final class MP4SegmentMuxer {
         return (segmentSoundFirstPts, segmentSoundLastPts)
     }
 
-    let videoOutputStreamIndex: Int32 = 0
-    let audioOutputStreamIndex: Int32 = 1
+    let videoOutputStreamIndex: Int32
+    let audioOutputStreamIndex: Int32
+    private let audioOnly: Bool
 
     private let splitter: FragmentSplitter
 
@@ -303,12 +304,16 @@ final class MP4SegmentMuxer {
         sessionDir: URL,
         video: VideoConfig,
         audio: AudioConfig?,
+        audioOnly: Bool = false,
         maxBufferedFragmentSeconds: Double = 8.0,
         audioMoovPrimeFrame: [UInt8]? = nil,
         audioDelaySeconds: Double = 0,
         onStorageExhausted: (@Sendable () -> Void)? = nil,
         onInitCaptured: @escaping (Data) -> Void
     ) throws {
+        self.audioOnly = audioOnly
+        self.videoOutputStreamIndex = audioOnly ? -1 : 0
+        self.audioOutputStreamIndex = audioOnly ? 0 : 1
         self.currentSegmentIndex = initialSegmentIndex
         self.sessionDir = sessionDir
         self.haveAudio = audio != nil
@@ -417,7 +422,8 @@ final class MP4SegmentMuxer {
             try Self.configureStreamsAndWriteHeader(
                 ctx: ctx,
                 video: video,
-                audio: audio
+                audio: audio,
+                audioOnly: audioOnly
             )
         } catch {
             cleanup()
@@ -425,9 +431,9 @@ final class MP4SegmentMuxer {
         }
         self.headerWritten = true
 
-        muxerVideoTimeBase = ctx.pointee.streams.advanced(by: 0).pointee!.pointee.time_base
+        muxerVideoTimeBase = audioOnly ? video.timeBase : ctx.pointee.streams.advanced(by: 0).pointee!.pointee.time_base
         if haveAudio {
-            muxerAudioTimeBase = ctx.pointee.streams.advanced(by: 1).pointee!.pointee.time_base
+            muxerAudioTimeBase = ctx.pointee.streams.advanced(by: Int(audioOutputStreamIndex)).pointee!.pointee.time_base
             // AE#464: same reason as the bound below. Latched after write_header rewrote the stream
             // time_base, because that is the base the packets arrive in.
             audioDelayTicks = Self.audioDelayTicks(seconds: audioDelaySeconds,
@@ -449,7 +455,7 @@ final class MP4SegmentMuxer {
         // write_header has rewritten the stream time_base (#64).
         maxBufferedFragmentTicks = Self.bufferedFragmentTicks(
             seconds: maxBufferedFragmentSeconds,
-            timeBase: muxerVideoTimeBase
+            timeBase: audioOnly ? muxerAudioTimeBase : muxerVideoTimeBase
         )
 
         // AE#222: prime moov from one real audio frame when the audio sample entry is packet-derived. Without
@@ -552,7 +558,8 @@ final class MP4SegmentMuxer {
     private static func configureStreamsAndWriteHeader(
         ctx: UnsafeMutablePointer<AVFormatContext>,
         video: VideoConfig,
-        audio: AudioConfig?
+        audio: AudioConfig?,
+        audioOnly: Bool = false
     ) throws {
         // strict=-2 lets the mp4 muxer write Dolby Vision atoms (dvcC,
         // dvvC) and other non-strict-ISOBMFF extensions when the source
@@ -560,37 +567,39 @@ final class MP4SegmentMuxer {
         // setting; mp4 muxer respects the same compliance level.
         ctx.pointee.strict_std_compliance = -2
 
-        // Video stream.
-        guard let videoStream = avformat_new_stream(ctx, nil) else {
-            throw MuxerError.streamCreationFailed
-        }
-        let vCopy = avcodec_parameters_copy(videoStream.pointee.codecpar, video.codecpar)
-        guard vCopy >= 0 else {
-            throw MuxerError.copyParametersFailed(code: vCopy)
-        }
-        videoStream.pointee.time_base = video.timeBase
-        if let override = video.codecTagOverride,
-           let tag = Self.mkTag(fromFourCC: override) {
-            videoStream.pointee.codecpar.pointee.codec_tag = tag
-        }
-        switch video.doviConfig {
-        case .keep:
-            break
-        case .strip:
-            Self.stripDolbyVisionSideData(videoStream.pointee.codecpar)
-        case .rewriteToProfile81:
-            Self.rewriteDoviConfig(videoStream.pointee.codecpar, profile: 8, blCompatibilityID: 1)
-        case .rewriteToProfile5:
-            Self.rewriteDoviConfig(videoStream.pointee.codecpar, profile: 5, blCompatibilityID: 0)
-        }
-        if let co = video.colorOverride {
-            videoStream.pointee.codecpar.pointee.color_primaries = co.primaries
-            videoStream.pointee.codecpar.pointee.color_trc = co.trc
-            videoStream.pointee.codecpar.pointee.color_space = co.space
-            videoStream.pointee.codecpar.pointee.color_range = co.range
-        }
-        if let extradata = video.extradataOverride {
-            Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
+        // Audio renditions keep the source video clock for segment cuts, without publishing video.
+        if !audioOnly {
+            guard let videoStream = avformat_new_stream(ctx, nil) else {
+                throw MuxerError.streamCreationFailed
+            }
+            let vCopy = avcodec_parameters_copy(videoStream.pointee.codecpar, video.codecpar)
+            guard vCopy >= 0 else {
+                throw MuxerError.copyParametersFailed(code: vCopy)
+            }
+            videoStream.pointee.time_base = video.timeBase
+            if let override = video.codecTagOverride,
+               let tag = Self.mkTag(fromFourCC: override) {
+                videoStream.pointee.codecpar.pointee.codec_tag = tag
+            }
+            switch video.doviConfig {
+            case .keep:
+                break
+            case .strip:
+                Self.stripDolbyVisionSideData(videoStream.pointee.codecpar)
+            case .rewriteToProfile81:
+                Self.rewriteDoviConfig(videoStream.pointee.codecpar, profile: 8, blCompatibilityID: 1)
+            case .rewriteToProfile5:
+                Self.rewriteDoviConfig(videoStream.pointee.codecpar, profile: 5, blCompatibilityID: 0)
+            }
+            if let co = video.colorOverride {
+                videoStream.pointee.codecpar.pointee.color_primaries = co.primaries
+                videoStream.pointee.codecpar.pointee.color_trc = co.trc
+                videoStream.pointee.codecpar.pointee.color_space = co.space
+                videoStream.pointee.codecpar.pointee.color_range = co.range
+            }
+            if let extradata = video.extradataOverride {
+                Self.replaceExtradata(videoStream.pointee.codecpar, with: extradata)
+            }
         }
         if let audio = audio {
             guard let audioStream = avformat_new_stream(ctx, nil) else {
@@ -656,6 +665,11 @@ final class MP4SegmentMuxer {
     @discardableResult
     func writePacket(_ packet: UnsafeMutablePointer<AVPacket>) -> (rc: Int32, written: WrittenTimestamps) {
         guard let ctx = formatContext else { return (-1, .none) }
+        if audioOnly, packet.pointee.stream_index == videoOutputStreamIndex {
+            let written = WrittenTimestamps(pts: packet.pointee.pts, dts: packet.pointee.dts)
+            av_packet_unref(packet)
+            return (0, written)
+        }
 
         // AE#464: the host's lip-sync offset, applied to the audio track only and BEFORE the
         // sanitizer, so the invariants it enforces hold for the timestamps that actually land in the
@@ -691,7 +705,7 @@ final class MP4SegmentMuxer {
         // moof+mdat into the current staging file before the buffered span grows without bound. Tracked
         // on the video output stream only; audio/subtitle packets ride along and are force-drained by the
         // flush. Flush BEFORE writing the triggering packet so it opens a fresh window.
-        if streamIndex == videoOutputStreamIndex, packet.pointee.dts != Int64.min {
+        if streamIndex == (audioOnly ? audioOutputStreamIndex : videoOutputStreamIndex), packet.pointee.dts != Int64.min {
             let dts = packet.pointee.dts
             if fragmentWindowFirstVideoDts == Int64.min {
                 fragmentWindowFirstVideoDts = dts

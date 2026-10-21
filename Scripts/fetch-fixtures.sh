@@ -393,3 +393,18 @@ echo "  swift run aetherctl probe $FIXTURES_DIR/hdr10-hevc.mp4"
 echo "  swift run aetherctl validate $FIXTURES_DIR/av1.mp4"
 echo ""
 echo "Real-world DV / Atmos sources go in $FIXTURES_DIR/user/ (gitignored)."
+
+# Native audio renditions: same-language alternatives and an actual codec change. No copyrighted media.
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i testsrc2=size=160x90:rate=24 \
+    -f lavfi -i sine=frequency=440:sample_rate=48000 \
+    -f lavfi -i sine=frequency=880:sample_rate=48000 \
+    -f lavfi -i sine=frequency=1320:sample_rate=48000 \
+    -map 0:v -map 1:a -map 2:a -map 3:a \
+    -c:v libx264 -preset ultrafast -pix_fmt yuv420p -g 48 \
+    -c:a:0 aac -ac:a:0 2 -b:a:0 64k \
+    -c:a:1 ac3 -ac:a:1 6 -b:a:1 192k \
+    -c:a:2 aac -ac:a:2 2 -b:a:2 64k \
+    -metadata:s:a:0 language=eng -metadata:s:a:0 title=Main \
+    -metadata:s:a:1 language=eng -metadata:s:a:1 title=Commentary \
+    -metadata:s:a:2 language=deu -t 16 "$FIXTURES_DIR/native-audio-tracks.mkv"

@@ -7386,6 +7386,22 @@ public final class AetherEngine: ObservableObject {
     /// turned into a reload the bypass has no audio override for. A host that wants another language on
     /// that route loads a URL that carries it.
     public func selectAudioTrack(index: Int) {
+        if let renditions = nativeVideoSession?.nativeAudioRenditions {
+            guard audioTracks.contains(where: { $0.id == index }) else { return }
+            renditions.select(index, at: currentTime)
+            audioSelectionTask?.cancel()
+            let generation = loadGeneration
+            audioSelectionTask = Task { @MainActor [weak self, weak item = currentAVPlayerItem] in
+                guard let self, let item,
+                      let group = try? await item.asset.loadMediaSelectionGroup(for: .audible),
+                      !Task.isCancelled, self.loadGeneration == generation,
+                      self.currentAVPlayerItem === item,
+                      let option = group.options.first(where: { $0.hasMediaCharacteristic(
+                          AVMediaCharacteristic(rawValue: NativeAudioRenditions.characteristic(index))) }) else { return }
+                item.select(option, in: group)
+            }
+            return
+        }
         if videoRoute == .remoteBypass {
             EngineLog.emit(
                 "[AetherEngine] selectAudioTrack(\(index)) ignored: AVPlayer owns the audio selection on "

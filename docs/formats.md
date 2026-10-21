@@ -628,3 +628,18 @@ Things that work today but have a documented edge case, or are deferred behind a
 - **AV1 on Apple TV is software-decoded.** No current Apple TV chip ships HW AV1. The `SoftwarePlaybackHost` + dav1d path handles it, but CPU use is meaningfully higher than HW HEVC. On iOS 17+ / macOS 14+ AV1 routes through Apple's HW pipeline transparently. Future Apple TV chips with HW AV1 will be picked up automatically by `VTCapabilityProbe`.
 - **AV1 Dolby Vision Profile 10.0 has wrong colours when software-decoded.** dav1d / libavcodec cannot decode the proprietary DV colour space, so a Profile 10.0 source (DV-only, no fallback base layer) renders with incorrect colours on the SW path. Profiles 10.1 and 10.4 are unaffected because they carry an HDR10 / HLG base layer. Profile 10.0 only renders correctly through the native AVPlayer path on hosts with HW AV1 decode.
 - **Dolby Vision Profile 5 / AV1 Profile 10.0 thumbnails skip the RPU reshaping curves.** `FrameExtractor` now applies the DV colour transform (from `AV_FRAME_DATA_DOVI_METADATA`) so P5 / P10.0 stills come out with correct colour, validated against a libplacebo render. The per-frame reshaping polynomials are intentionally not applied: they are not what causes the visible green / magenta corruption, and skipping them keeps this a lightweight CPU pass rather than a full Dolby Vision compositor. Brightness / contrast can therefore differ marginally from a fully graded DV render. A frame that carries no DV metadata falls back to the standard path.
+
+## Native audio alternatives in the fork
+
+`LoadOptions.nativeAudioTrackNames` opts finite seekable sources into separate, real audio-only
+HLS renditions. Names describe the source codec, channels, language and title supplied by the host;
+they do not assert receiver output. A source stream index identifies each rendition, including
+same-language alternatives. Only the selected rendition opens an independent reader and processing
+pipeline; manifests and localized names do not decode alternative tracks. Stream-copy preserves native
+E-AC-3/JOC. TrueHD and DTS:X reuse the repaired object renderer/APAC route and existing lossless
+bridge cascade. `nativeAudioLosslessStreamIndices` preserves the host's per-track recovery policy.
+Video and subtitle delivery remain on their original session. Each independent source reader retains
+its own bounded read-ahead window; high-bitrate network headroom and HDMI output require device
+acceptance. Generate the synthetic witness using `Scripts/fetch-fixtures.sh` before running the
+`NativeAudioRenditionsTests` and `NativeAudioAVFoundationTests` suites; real-media tests skip when
+the generated fixture is absent.

@@ -720,6 +720,8 @@ struct LiveTargetDurationSeal {
 /// thread on a per-index condvar (backpressure model). Scrub policy: in-cache = fast path;
 /// forward seek within forwardWaitWindow of cache.max = wait; anything else fires restartHandler.
 final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
+    var nativeAudioRenditions: NativeAudioRenditions?
+
 
     private let cache: SegmentCache
     /// Immutable for VOD; grows under stateLock for live (producer appends via appendLiveSegment).

@@ -1,5 +1,11 @@
 # Changelog
 
+## Fork: native container audio renditions — 2026-10-21
+
+- Opt-in real audio-only HLS alternatives, source names and container identities for AVKit.
+- Lazy single-track processing, serialized switching and retained lossless recovery state.
+
+
 Quick index of AetherEngine releases. Detailed per-release notes (breaking
 changes, full fix list, acknowledgements) live on
 [GitHub Releases](https://github.com/superuser404notfound/AetherEngine/releases).

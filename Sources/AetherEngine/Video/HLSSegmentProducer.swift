@@ -173,7 +173,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
 
     /// Source video TB, carried to rescale timestamps (avformat_write_header rewrites the muxer's TB).
     private let sourceVideoTimeBase: AVRational
-    private let videoConfig: StreamConfig
+    private let audioOnlyRendition: Bool
+    let videoConfig: StreamConfig
     private let audioConfig: AudioConfig?
 
     /// Start PTS (source video TB) for each segment at baseIndex+i; used to detect segment crossings.
@@ -1492,6 +1493,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
         videoStreamIndex: Int32,
         video: StreamConfig,
         audio: AudioConfig? = nil,
+        audioOnlyRendition: Bool = false,
         sideAudioDemuxer: Demuxer? = nil,
         cache: SegmentCache,
         baseIndex: Int = 0,
@@ -1520,6 +1522,8 @@ final class HLSSegmentProducer: @unchecked Sendable {
         servesSegmentsProgressively: Bool = false,
         epoch: UInt64 = 0
     ) throws {
+        self.audioOnlyRendition = audioOnlyRendition
+        self.hdr10PlusDetected = audioOnlyRendition
         self.epoch = epoch
         self.servesSegmentsProgressively = servesSegmentsProgressively
         self.audioDelaySeconds = audioDelaySeconds
@@ -1565,7 +1569,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
             }
             if let extra { vodH264Configuration = H264ConfigurationTracker(avcC: extra) }
         }
-        self.convertP7Active = video.convertP7ToProfile81
+        self.convertP7Active = !audioOnlyRendition && video.convertP7ToProfile81
         self.audioConfig = audio
         self.cache = cache
         self.baseIndex = baseIndex
@@ -2188,6 +2192,7 @@ final class HLSSegmentProducer: @unchecked Sendable {
                 sessionDir: cache.sessionDir,
                 video: muxerVideo,
                 audio: muxerAudio,
+                audioOnly: audioOnlyRendition,
                 // Cap the muxer's in-RAM interleaver at ~2 segments so a long/degenerate segment or an
                 // audio stream that decodes to nothing can't buffer the whole span and fill the disk (#64).
                 // Floored at 8s (the historical 2 x 4s value): a sub-second fastZap cut target (AE#195)

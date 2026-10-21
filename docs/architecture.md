@@ -715,3 +715,13 @@ never repeats an already completed startup cushion wait. The change does not
 cut a GOP at a dependent frame or falsify a segment's duration. A consumer item
 replacement can still cause a short interruption; missing source frames cannot
 be reconstructed by this policy.
+
+## Native container audio alternatives
+
+The opt-in native audio catalog separates video-only segments from audio-only renditions.
+`NativeAudioRenditions` publishes metadata without opening readers and serializes the selected
+track's independent demux/bridge/mux session. Each source stream has an immutable container-indexed
+URI and media characteristic. An audio-only muxer retains the video clock for aligned cuts but
+publishes no video track; both sessions use the same segment plan. Cancellation invalidates queued
+requests and interrupts source reads before owned teardown. Decoder teardown must precede activation
+of a replacement. Existing subtitle stores, video cache and AVPlayerItem remain in place.

@@ -106,6 +106,14 @@ public final class HLSVideoEngine: @unchecked Sendable {
     }
     private var server: HLSLocalServer?
     var provider: VideoSegmentProvider?
+    var nativeAudioTrackNames: [Int: String] = [:]
+    var nativeAudioLosslessStreamIndices: Set<Int> = []
+    var nativeAudioReaderFactory: CustomSourceReopenFactory?
+    var nativeAudioRenditions: NativeAudioRenditions?
+    var audioOnlyRendition = false
+    var nativeAudioSegmentPlan: [Segment]?
+    var nativeAudioSourceReader: (reader: IOReader, formatHint: String?)?
+    var onNativeAudioActivated: (@Sendable (Int) -> Void)?
     let nativeLiveDVRPolicy = LiveDVRRetentionPolicy() // shared native retention contract; internal for integration witnesses
     private let liveRetentionQueue = DispatchQueue(label: "com.aetherengine.live-retention", qos: .utility)
     private var liveRetentionScheduled = false // restartLock; at most one pending I/O job
@@ -1315,15 +1323,24 @@ public final class HLSVideoEngine: @unchecked Sendable {
             preopenedDemuxer = nil
         } else {
             dem = Demuxer()
+            demuxer = dem
             do {
-                try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders,
-                             profile: openProfile.withRequestHeaders(requestHeaders), isLive: isLiveSession)
+                if let source = nativeAudioSourceReader {
+                    try dem.open(reader: source.reader, formatHint: source.formatHint,
+                                 profile: openProfile.withRequestHeaders(requestHeaders))
+                } else {
+                    try dem.open(url: sourceURL, extraHeaders: sourceHTTPHeaders,
+                                 profile: openProfile.withRequestHeaders(requestHeaders), isLive: isLiveSession)
+                }
             } catch {
                 throw Self.openFailure(from: error)
             }
         }
         demuxer = dem
         openedSourceIsSeekable = dem.isSourceSeekable
+        if !nativeAudioTrackNames.isEmpty, isLiveSession || !openedSourceIsSeekable {
+            throw HLSVideoEngineError.openFailed(reason: "Native audio renditions require a finite seekable source")
+        }
         dem.onNetworkPhaseChanged = onNetworkPhaseChanged   // surface source stall/reconnect to playbackPhase (#85)
         dem.playIntentProvider = playIntentProvider   // a held connection ends on a pause, not on a parked producer
 
@@ -1769,6 +1786,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         // ~40 ms segments the producer cannot cut, wedging the near-EOF resume; the plan and producer
         // share these boundaries, so the merge fixes both at once).
         plan = Self.collapseShortSegments(plan, minDurationSeconds: Self.minSegmentDurationSeconds)
+        if let nativeAudioSegmentPlan {
+            plan = nativeAudioSegmentPlan
+            firstKeyframePts = plan.first?.startPts ?? 0
+            firstKeyframeSeconds = Double(firstKeyframePts) * sourceVideoTbSeconds
+        }
         self.segmentPlan = plan
         if !keyframeBytePositions.isEmpty {
             sourcePeakBitrate = Self.peakSegmentBitrate(plan: plan, keyframeBytePositions: keyframeBytePositions)
@@ -1900,7 +1922,9 @@ public final class HLSVideoEngine: @unchecked Sendable {
             }
         }
         let audioStreamIndex: Int32
-        if let override = audioSourceStreamIndexOverride {
+        if !nativeAudioTrackNames.isEmpty {
+            audioStreamIndex = -1
+        } else if let override = audioSourceStreamIndexOverride {
             if Self.isAudioStream(demuxer: audioDem, index: override) {
                 audioStreamIndex = override
                 EngineLog.emit(
@@ -2117,7 +2141,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             sourceAudioStreamIndex: audioStreamIndex,
             sourceAudioStream: audioStreamIndex >= 0 ? audioDem.stream(at: audioStreamIndex) : nil,
             audioDemuxer: audioDem,
-            sourceCarriesAudio: audioDem.firstAudioStreamIndexByType >= 0,
+            sourceCarriesAudio: nativeAudioTrackNames.isEmpty && audioDem.firstAudioStreamIndexByType >= 0,
             audioHLSCodecs: &audioHLSCodecs,
             audioLanguage: audioLanguage
         )
@@ -2228,6 +2252,31 @@ public final class HLSVideoEngine: @unchecked Sendable {
             segmentServedHandler: segmentServedHandler
         )
         self.provider = prov
+        if !nativeAudioTrackNames.isEmpty {
+            let tracks = audioDem.audioTrackInfos()
+            let initial = audioSourceStreamIndexOverride.map(Int.init)
+                ?? tracks.first(where: \.isDefault)?.id ?? tracks.first?.id
+            nativeAudioRenditions = NativeAudioRenditions(
+                tracks: tracks, names: nativeAudioTrackNames, initial: initial,
+                plan: plan, rendering: objectAudioRendering, losslessTracks: nativeAudioLosslessStreamIndices, makeSession: { [weak self] index, seconds in
+                    guard let self else { throw CancellationError() }
+                    return try self.makeNativeAudioSession(index: index, seconds: seconds)
+                }, activated: { [weak self] index, child in
+                    guard let self else { return }
+                    self.activeAudioSourceStreamIndex = Int32(index)
+                    self.audioDelivery = child.audioDelivery
+                    self.audioPipelineDescription = child.audioPipelineDescription
+                    self.audioIsAPAC = child.audioIsAPAC
+                    self.audioIsAtmosStreamCopy = child.audioIsAtmosStreamCopy
+                    self.audioIsConfirmedDTSX = child.audioIsConfirmedDTSX
+                    self.onNativeAudioActivated?(index)
+                }, failed: { [weak self] index in
+                    self?.activeAudioSourceStreamIndex = Int32(index)
+                    self?.audioDelivery = .droppedNoPipeline
+                    self?.surfaceVODSourceFailure(-1, "Native audio rendition could not start", kind: .audioTrackSwitchFailed)
+                })
+            prov.nativeAudioRenditions = nativeAudioRenditions
+        }
         // AE#520 round 2: the close reads it on the playlist-build thread, so it is a closure over a
         // mirror rather than a read of the item.
         prov.consumerBufferedSecondsProvider = consumerBufferedSecondsProvider
@@ -2243,7 +2292,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         )
 
         let srv = HLSLocalServer(provider: prov)
-        try srv.start()
+        if !audioOnlyRendition { try srv.start() }
         self.server = srv
 
         // 8. Kick the pump. Seek on the video stream's exact plan timestamp and forbid an earlier
@@ -2353,7 +2402,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
         #else
         let videoCodecNeedsMasterSignaling = false
         #endif
-        let useMasterPlaylist = AetherEngine.forceMasterPlaylistForTesting
+        let useMasterPlaylist = nativeAudioRenditions != nil || AetherEngine.forceMasterPlaylistForTesting
             || Self.resolveUseMasterPlaylist(
             videoRange: videoRange, effectiveDvMode: effectiveDvMode,
             panelIsInHDRMode: panelIsInHDRMode, displaySupportsHDR: displaySupportsHDR,
@@ -3013,7 +3062,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         return (url, offset)
     }
 
-    public func stop() {
+    public func stop() { stop(waitForCleanup: false) }
+
+    func stop(waitForCleanup: Bool) {
+        nativeAudioRenditions?.stop(waitForCleanup: waitForCleanup)
+        nativeAudioRenditions = nil
         preparedServe = nil
         cancelResidentRangesPublish()
         // Sodalite#32: drop the tap routes first so a pump still draining its last packets no-ops
@@ -3046,6 +3099,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
         let sd = sideAudioDemuxer
         sideAudioDemuxer = nil
         // Preopened demuxer: nil if start() consumed it; close is idempotent.
+        let nativeAudioReader = nativeAudioSourceReader?.reader
+        nativeAudioSourceReader = nil
         let preopened = preopenedDemuxer
         preopenedDemuxer = nil
         let prov = provider
@@ -3089,10 +3144,11 @@ public final class HLSVideoEngine: @unchecked Sendable {
         d?.markClosed()
         sd?.markClosed()
         preopened?.markClosed()
+        nativeAudioReader?.cancel()
 
         // Detached cleanup: producer waitForFinish must precede demuxer/cache/server close
         // (pump accesses them during unwind). ownedParams released last (pump read them).
-        BlockingWork.detached {
+        let cleanup: @Sendable () -> Void = {
             iFrames?.shutdown()
             previewFrames?.shutdown()
             previewBuilder?.close()
@@ -3103,8 +3159,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
             d?.close()
             sd?.close()
             preopened?.close()
+            nativeAudioReader?.close()
             _ = ownedParams
         }
+        if waitForCleanup { cleanup() } else { BlockingWork.detached { cleanup() } }
     }
 
     deinit {
@@ -3302,6 +3360,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             videoStreamIndex: videoStreamIndex,
             video: cfg,
             audio: savedAudioConfig,
+            audioOnlyRendition: audioOnlyRendition,
             sideAudioDemuxer: sideAudioDemuxer,
             cache: cache,
             baseIndex: baseIndex,

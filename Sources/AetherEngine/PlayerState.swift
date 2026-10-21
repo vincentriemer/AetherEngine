@@ -412,6 +412,12 @@ public enum DolbyVisionHandling: String, Sendable, Equatable, CaseIterable {
 }
 
 public struct LoadOptions: Sendable, Equatable {
+    /// Container-indexed source names for native HLS audio renditions. Empty keeps legacy muxed audio.
+    /// Only validated container audio streams are published; names describe source formats.
+    public var nativeAudioTrackNames: [Int: String] = [:]
+    /// Tracks that exhausted object-audio recovery; their native renditions use the lossless bed.
+    public var nativeAudioLosslessStreamIndices: Set<Int> = []
+
     /// Diagnostic lever: omit BT.2020 / transfer / YCbCr matrix from AVDisplayCriteria so AVPlayer re-reads color from the bitstream. Default off.
     public var omitCriteriaColorExtensions: Bool
     /// The engine writes no display criteria because AVKit does: `true` is `DisplayCriteriaOwner.avKit`, and the

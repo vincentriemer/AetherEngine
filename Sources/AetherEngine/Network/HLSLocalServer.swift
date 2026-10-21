@@ -93,6 +93,7 @@ protocol HLSSegmentProvider: AnyObject {
     /// AE#726: `language` is nil for an untagged E-AC-3 JOC track, which still gets a rendition because
     /// its CHANNELS is the only place the master can declare object audio.
     var masterAudioRendition: (language: String?, name: String)? { get }
+    var nativeAudioRenditions: NativeAudioRenditions? { get }
 
     /// CHANNELS for that same EXT-X-MEDIA tag, nil to omit it. Apple's HLS Authoring Spec makes the
     /// attribute REQUIRED on an audio rendition, and Dolby's DD+ delivery kit makes it the ONLY
@@ -194,6 +195,7 @@ extension HLSSegmentProvider {
     var masterHDCPLevel: String? { nil }
     var masterClosedCaptions: String? { nil }
     var masterAudioRendition: (language: String?, name: String)? { nil }
+    var nativeAudioRenditions: NativeAudioRenditions? { nil }
     var masterAudioChannels: String? { nil }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { [] }
     var nativeSubtitleDefaultOrdinal: Int { 0 }
@@ -1118,6 +1120,20 @@ final class HLSLocalServer: @unchecked Sendable {
             }
         }
 
+        if let renditions = provider?.nativeAudioRenditions {
+            if normalizedPath.hasPrefix("/audio_"),
+               normalizedPath.hasSuffix(".mp4") || normalizedPath.hasSuffix(".m4s") {
+                // An independent reader/decoder may need a cold open. Keep AVPlayer's request alive
+                // while preparing real bytes; a superseded request ends without a final chunk.
+                guard writeAll(fd: fd, data: Self.chunkedResponseHeader(contentType: "audio/mp4"), path: normalizedPath),
+                      let response = renditions.response(path: normalizedPath) else { return false }
+                return sendChunkedBody(fd: fd, path: normalizedPath, data: response.data)
+            }
+            if let response = renditions.response(path: normalizedPath) {
+                return send200(fd: fd, path: normalizedPath, data: response.data, contentType: response.type)
+            }
+        }
+
         switch normalizedPath {
         case "/master.m3u8":
             if provider?.masterCodecs != nil || provider?.staticMasterPlaylistBody != nil {
@@ -1791,7 +1807,9 @@ final class HLSLocalServer: @unchecked Sendable {
         if let avg = provider.masterAverageBandwidth {
             streamInfAttrs.append("AVERAGE-BANDWIDTH=\(avg)")
         }
-        streamInfAttrs.append("CODECS=\"\(codecs)\"")
+        let renditionCodecs = provider.nativeAudioRenditions?.codecs ?? []
+        let allCodecs = ([codecs] + renditionCodecs).joined(separator: ",")
+        streamInfAttrs.append("CODECS=\"\(allCodecs)\"")
         // #98 Stage 1.5: a reduced master drops the DV SUPPLEMENTAL-CODECS so the variant reads as
         // plain HDR/SDR HEVC; the segment sample entries still drive decoding.
         if variant == .primary, let supplemental = provider.masterSupplementalCodecs {
@@ -1815,13 +1833,16 @@ final class HLSLocalServer: @unchecked Sendable {
         // selection group at all, so every UI over that group (AVKit's audio menu) shows "Not Specified".
         // MP4SegmentMuxer writes the mdhd too, but that is not what fixes the label.
         let audioRendition = provider.masterAudioRendition
-        if audioRendition != nil {
+        if audioRendition != nil || provider.nativeAudioRenditions != nil {
             streamInfAttrs.append("AUDIO=\"aud\"")
         }
         if let cc = provider.masterClosedCaptions {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
-        if let audio = audioRendition {
+        if let renditions = provider.nativeAudioRenditions {
+            lines.append("#EXT-X-SESSION-DATA:DATA-ID=\"_hls.localized-rendition-names\",URI=\"audio_names.json\"")
+            lines.append(contentsOf: renditions.mediaTags)
+        } else if let audio = audioRendition {
             var audioAttrs = ["TYPE=AUDIO", "GROUP-ID=\"aud\"", "NAME=\"\(audio.name)\""]
             if let language = audio.language { audioAttrs.append("LANGUAGE=\"\(language)\"") }
             audioAttrs.append(contentsOf: ["DEFAULT=YES", "AUTOSELECT=YES"])

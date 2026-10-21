@@ -895,6 +895,21 @@ extension AetherEngine {
         // `updateRequestHeaders(_:)` reaches that reader and every reopen the producer makes. Set before start().
         session.requestHeaders = sessionRequestHeaders
         // AE#464: every producer this session builds reads it off the session. Set before start().
+        session.nativeAudioTrackNames = loadedOptions.nativeAudioTrackNames
+        session.nativeAudioLosslessStreamIndices = loadedOptions.nativeAudioLosslessStreamIndices
+        if let reader = customReader {
+            let hint = customFormatHint
+            session.nativeAudioReaderFactory = { reader.makeIndependentReader().map { ($0, hint) } }
+        }
+        session.onNativeAudioActivated = { [weak self] index in
+            self?.hop(for: generation) { [weak self] in
+                guard let self, self.nativeVideoSession?.nativeAudioRenditions?.selectedIndex == index else { return }
+                self.activeAudioTrackIndex = index
+                self.activeAudioDecoder = self.nativeVideoSession?.audioPipelineDescription
+                self.recomputeAudioDelivery()
+                self.followAtmosOutput()
+            }
+        }
         session.audioDelaySeconds = loadedOptions.audioDelaySeconds
         session.servesSegmentsProgressively = loadedOptions.progressiveSegmentDelivery
         // #240: the pump claims the source link through this gate while it is fetching, so the
@@ -1181,6 +1196,10 @@ extension AetherEngine {
                         category: .session
                     )
                     return
+                }
+                if kind == .audioTrackSwitchFailed, session.nativeAudioRenditions != nil {
+                    self.activeAudioTrackIndex = Int(session.activeAudioSourceStreamIndex)
+                    self.recomputeAudioDelivery()
                 }
                 self.publishError(PlaybackErrorInfo(kind: kind,
                                                     message: "\(reason) (code \(code))",
