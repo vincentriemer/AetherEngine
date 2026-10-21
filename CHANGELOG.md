@@ -10,7 +10,9 @@ the public-API contract.
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed (ATVPlayer vendor repair, October 20, 2026)
+
+- Render exact TrueHD objects directly into the APAC layout instead of reconstructing them from the channel bed. Preserve heights and full object metadata; fail closed if the linked decoder lacks interpolation. Rebuild LibTrueHD for every supported Apple slice. DTS:X and native audio routes are unchanged.
 
 ## [7.44.0] - 2026-10-20
 

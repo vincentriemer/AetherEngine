@@ -39,7 +39,7 @@ let package = Package(
         ),
         .trait(
             name: "TrueHDReferenceRender",
-            description: "Measurement only: with TrueHDObjectAudio and a LibTrueHD built with matrix interpolation, AETHER_TRUEHD_REFERENCE_RENDER=1 decodes TrueHD Atmos exactly and mixes its objects, the reference the bed split is measured against. Never ship it.",
+            description: "Compatibility trait; exact TrueHD object rendering is now the production default and needs no measurement environment switch.",
             enabledTraits: ["TrueHDObjectAudio"]
         ),
         .trait(
@@ -86,7 +86,7 @@ let package = Package(
         // TrueHD decoder that also decodes the Atmos object presentation (beds, objects, OAMD) for
         // `objectAudioRendering` (#731). The Rust `truehd` crate (Apache-2.0) behind a C API, prebuilt
         // as an xcframework like LibDovi so consumers need no Rust. Pinned to the minor for the same reason.
-        .package(url: "https://github.com/superuser404notfound/LibTrueHD", .upToNextMinor(from: "3.0.0")),  // 3.0.0: API 2, the bed companion (the channel presentation decoded with the object presentation) and a per-handle interpolation switch; the interpolating decode is an opt-in build feature, off in the shipped binary (#731); 2.3.1: truehd_atmos_version_string() names the truehd commit actually built in (read from Cargo.lock, LibTrueHD#2), same decoder; 2.3.0: decodes about a third faster again (harletty's truehd speed work: blocks decoded in place, table-driven Huffman, vectorised prediction filters, whole-block matrices; truehdd#42 included), byte-identical output; 2.2.1: rust_eh_personality exported weak, so it coalesces with LibDovi's copy and a host with its own Objective-C and C++ stays within compact unwind's three personality routines (#752); same decoder; 2.2.0: decodes about 30% faster (the truehd crate with its block and PCM buffers sized to the samples they hold, truehdd#42, from a fork of upstream main until that is merged), byte-identical output; 2.1.0: x86_64 in the iOS simulator slice, so a generic iOS Simulator build of a host links; same decoder; 2.0.0: transferred from Silo-Server/SiloObjectAudio and renamed (product TrueHD), rebuilt from source; same decoder as SiloObjectAudio 1.0.0
+        .package(url: "https://github.com/vincentriemer/LibTrueHD", revision: "3d8fab68cc97c2b92f76d07e8ce54659caa6600b"), // Exact object decoding, every Apple slice rebuilt.
     ],
     targets: [
         .target(

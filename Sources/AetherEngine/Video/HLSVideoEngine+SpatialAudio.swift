@@ -3,20 +3,6 @@ import AetherLibavformat
 import AetherLibavcodec
 import AetherLibavutil
 
-/// Measurement only, in a build with the TrueHDReferenceRender trait: with this environment variable
-/// set to 1, TrueHD Atmos is decoded exactly and its objects mixed into the layout, the rendering
-/// `BedSplitter` is compared against. Without the trait it is always off and that path is not built.
-enum TrueHDReferenceRender {
-    static let variable = "AETHER_TRUEHD_REFERENCE_RENDER"
-    static var isOn: Bool {
-        #if TrueHDReferenceRender
-        ProcessInfo.processInfo.environment[variable] == "1"
-        #else
-        false
-        #endif
-    }
-}
-
 extension HLSVideoEngine {
 
     /// The object-audio format a source would be rendered as, before it is confirmed.
@@ -293,7 +279,7 @@ extension HLSVideoEngine {
             switch source {
             case .trueHDAtmos:
                 #if TrueHDObjectAudio
-                decoder = try TrueHDObjectAudioDecoder(splitsBed: !TrueHDReferenceRender.isOn)
+                decoder = try TrueHDObjectAudioDecoder()
                 #else
                 return nil
                 #endif
@@ -381,10 +367,8 @@ extension HLSVideoEngine {
             audioIsAPAC = true
             let rendering: String
             switch source {
-            case .trueHDAtmos where TrueHDReferenceRender.isOn:
-                rendering = "objects rendered into \(layout.rawValue) (reference render, \(TrueHDReferenceRender.variable))"
             case .trueHDAtmos:
-                rendering = "channel presentation split into \(layout.rawValue) by the objects' energy"
+                rendering = "exact object decode rendered into \(layout.rawValue)"
             case .dtsHDMasterAudio:
                 rendering = "bed and heights routed one to one into \(layout.rawValue)"
             }

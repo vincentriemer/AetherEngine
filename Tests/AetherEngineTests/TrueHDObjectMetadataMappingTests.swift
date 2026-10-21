@@ -61,7 +61,6 @@ struct TrueHDObjectMetadataMappingTests {
                 == SIMD3(0.5, 0.5, 0.5))
     }
 
-    #if TrueHDReferenceRender
     @Test("an active elevated object keeps its position, gain and largest size dimension")
     func plainObject() {
         let state = TrueHDObjectAudioDecoder.state(for: element(size: (0.1, 0.3, 0.2)))
@@ -154,11 +153,13 @@ struct TrueHDObjectMetadataMappingTests {
         #expect(abs(gains.reduce(0) { $0 + $1 * $1 } - 1) < 1e-5)
     }
 
-    #endif
-
     @Test("the decoder opens, takes input and asks for more")
     func decoderLifecycle() throws {
         let decoder = try TrueHDObjectAudioDecoder()
+        #expect(!decoder.splitsBed)
+        #expect(!decoder.playsBedOnly)
+        let comparison = try TrueHDObjectAudioDecoder(splitsBed: true)
+        #expect(comparison.playsBedOnly)
         let junk = [UInt8](repeating: 0x5A, count: 4096)
         try junk.withUnsafeBytes { try decoder.push($0) }
         #expect(try decoder.nextBlock() == nil)

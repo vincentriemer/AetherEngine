@@ -7,7 +7,7 @@ import TrueHD
 /// a C API): lossless decode of presentation 3, which for an Atmos stream is the bed plus up to 15
 /// dynamic objects, together with the object audio metadata (OAMD) that positions them.
 ///
-/// With `splitsBed` (the engine's TrueHD path, see `BedSplitter`) the decode is a different one:
+/// With explicit `splitsBed` (the approximate comparison path, see `BedSplitter`) the decode is a different one:
 /// the matrix interpolation values are discarded, so the object signals are approximate, every block
 /// also carries the stream's channel-based presentation (Dolby's own 7.1 or 5.1 rendering of the mix)
 /// from the same access unit, and elements are described as plain point sources: the bridge then
@@ -40,13 +40,16 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
     private let hold = ObjectMetadataHold()
     private var lent: ObjectMetadataHold.Copy?
 
-    /// `splitsBed` is false only for the measurement reference (`TrueHDReferenceRender` trait).
-    init(splitsBed: Bool = true) throws {
-        #if !TrueHDReferenceRender
-        precondition(splitsBed, "the exact decode and mix are only built with the TrueHDReferenceRender trait")
-        #endif
+    /// Full object rendering is the default. Bed splitting remains explicit for comparison.
+    init(splitsBed: Bool = false) throws {
         guard let handle = truehd_atmos_decoder_create(TRUEHD_ATMOS_PRESENTATION_HIGHEST) else {
             throw DecoderError(status: TRUEHD_ATMOS_ERR_INVALID_ARGUMENT, message: "create failed")
+        }
+        if !splitsBed {
+            guard truehd_atmos_decoder_set_ignore_interpolation(handle, false) == TRUEHD_ATMOS_OK else {
+                truehd_atmos_decoder_destroy(handle)
+                throw DecoderError(status: TRUEHD_ATMOS_ERR_INVALID_ARGUMENT, message: "exact object decoding unavailable")
+            }
         }
         self.handle = handle
         self.splitsBed = splitsBed
@@ -205,11 +208,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
     }
 
     private func state(for element: TrueHDAtmosElement) -> ObjectAudioElementState {
-        #if TrueHDReferenceRender
         splitsBed ? Self.pointSource(for: element) : Self.state(for: element)
-        #else
-        Self.pointSource(for: element)
-        #endif
     }
 
     /// An element as a point at its position: no size, snap, zone exclusion, screen anchoring or
@@ -221,8 +220,7 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         return ObjectAudioElementState(position: SIMD3(p.0, p.1, max(0, p.2)), gain: active ? element.gain : 0)
     }
 
-    #if TrueHDReferenceRender
-    // The reference render's mapping: size, snap, zones, screen anchoring and the elevation switch.
+    // Object rendering mapping: size, snap, zones, screen anchoring and the elevation switch.
     static func state(for element: TrueHDAtmosElement) -> ObjectAudioElementState {
         let active = element.flags & TRUEHD_ATMOS_ELEMENT_ACTIVE != 0
         var p = element.position
@@ -274,6 +272,5 @@ final class TrueHDObjectAudioDecoder: ObjectAudioDecoding {
         default: return []
         }
     }
-    #endif
 }
 #endif
