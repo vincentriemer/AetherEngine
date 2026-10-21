@@ -1292,6 +1292,8 @@ public final class AetherEngine: ObservableObject {
     /// drainer (SubtitleOverlayDrainer) from the session's SubtitlePacketStore. Replaces
     /// the embedded side-demuxer reader for every host, VOD and live, text and bitmap.
     var subtitleDrainTargets: [SubtitleChannel: Int32] = [:]
+    /// Native-only selection feeds AVPlayer without also decoding/retaining overlay images.
+    var nativeSubtitleOnly = false
     var subtitleDrainerTask: Task<Void, Never>?
     /// AE#628: the drain tick whose decode is running off the MainActor, nil while none is. At most
     /// one at a time, because a channel's decoder is one AVCodecContext and the tick in flight owns
@@ -4273,6 +4275,7 @@ public final class AetherEngine: ObservableObject {
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
         resetSubtitleOCRState()   // Phase D: new session, new axis
+        nativeSubtitleOnly = false
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
         audibleReadbackTask?.cancel()
@@ -6695,6 +6698,7 @@ public final class AetherEngine: ObservableObject {
         externalNativeStoreFillTask?.cancel()
         externalNativeStoreFillTask = nil
         resetSubtitleOCRState()   // Phase D: new session, new axis
+        nativeSubtitleOnly = false
         remoteHLSSubtitleDiscoveryTask?.cancel()
         remoteHLSSubtitleDiscoveryTask = nil
         audibleReadbackTask?.cancel()
@@ -7902,6 +7906,7 @@ public final class AetherEngine: ObservableObject {
         cancelSidecarTask()
         stopSubtitleDrainer(reason: .sessionStopped)   // #112 rework: both channels
         resetSubtitleOCRState()                // Phase D
+        nativeSubtitleOnly = false
         subtitleDrainTargets.removeAll()
         softwareSubtitlePacketStore = nil
         activeEmbeddedSubtitleStreamIndex = -1

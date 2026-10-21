@@ -11,6 +11,7 @@ extension AetherEngine {
         cancelSubtitleOCRWorker()
         guard let store = nativeStore(atOrdinal: ordinal) else { return }
         subtitleOCRArmedOrdinal = ordinal
+        refreshSubtitleStoreProtection()
         let language = ordinal < nativeSubtitleTrackTable.count
             ? nativeSubtitleTrackTable[ordinal].language : nil
         EngineLog.emit("[SubtitleOCR] worker armed: ordinal=\(ordinal) stream=\(streamIndex)", category: .engine)
@@ -68,6 +69,10 @@ extension AetherEngine {
         subtitleOCRSidecarFillTask = nil
         subtitleOCRDecoder = nil
         subtitleOCRLastTickUptime = nil   // #271
+        refreshSubtitleStoreProtection()
+        if subtitleDrainTargets.isEmpty {
+            cancelSubtitleForwardPrefetcher(reason: .subtitlesCleared)
+        }
     }
 
     /// Load/stop teardown: forget covered-region state too (new session, new axis).
@@ -93,6 +98,11 @@ extension AetherEngine {
             backscan: Self.subtitleDrainBackscanSeconds,
             jumpThreshold: Self.subtitleDrainJumpThresholdSeconds,
             elapsedSinceLastPlan: elapsed)
+        // Native-only playback has no overlay tick to re-anchor packet lookahead after a seek.
+        if Self.subtitleForwardPrefetchNeedsReanchor(
+            plan: plan, hadCursor: subtitleOCRCursors[ordinal] != nil) {
+            startSubtitleForwardPrefetcher(startAt: playhead)
+        }
         let window: (from: Double, through: Double)
         switch plan {
         case .idle:

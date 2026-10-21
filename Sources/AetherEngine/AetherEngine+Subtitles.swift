@@ -65,10 +65,11 @@ extension AetherEngine {
     /// `selectSubtitleTrack(index:)` with an explicit source-PTS start anchor. The public form passes the live
     /// `sourceTime`; the preferred-subtitle-language auto-select at load passes the resume position so the side
     /// demuxer seeks to the playhead instead of burst-reading from byte 0 on a resumed mid-file load (#73).
-    func selectSubtitleTrack(index: Int, startAt: Double) {
+    func selectSubtitleTrack(index: Int, startAt: Double, nativeOnly: Bool = false) {
         // Phase D: every selection change disarms the OCR worker first; the embedded bitmap
         // branch below re-arms it (cursors persist, so a reselect resumes coverage).
         cancelSubtitleOCRWorker()
+        nativeSubtitleOnly = nativeOnly
         // #316: an external track the remote-HLS proxy declared as a rendition is rendered by AVPlayer
         // itself, so it must NOT also start a sidecar decode; the overlay would draw the same cues a
         // second time, and only the rendition survives PiP / AirPlay / an external display.
@@ -121,20 +122,24 @@ extension AetherEngine {
         pgsStaleArrivalGates[.primary]?.reset()   // #100
         activeEmbeddedSubtitleStreamIndex = Int32(index)
         activeSubtitleTrackIndex = index
-        subtitleDrainTargets[.primary] = Int32(index)
-        subtitleDrainDecoders[.primary] = nil
-        subtitleDrainCursors[.primary] = nil
+        clearSubtitleDrainTarget(channel: .primary, reason: .subtitlesCleared)
+        if !nativeOnly {
+            subtitleDrainTargets[.primary] = Int32(index)
+        }
         // Phase D: a bitmap track additionally arms the OCR worker feeding its native rendition.
         // Armed BEFORE the prefetcher start so the raised lead is picked up.
         if let ordinal = Self.nativeSubtitleOrdinal(forActiveTrack: index, in: nativeSubtitleTrackTable),
            nativeSubtitleTrackTable[ordinal].needsOCR {
             startSubtitleOCRWorker(ordinal: ordinal, streamIndex: Int32(index))
         }
-        startSubtitleDrainer()
-        startSubtitleForwardPrefetcher(startAt: startAt)   // #151
+        refreshSubtitleStoreProtection()
+        if !nativeOnly { startSubtitleDrainer() }
+        if !subtitlePacketStreamIndices.isEmpty {
+            startSubtitleForwardPrefetcher(startAt: startAt)   // #151, also supplies native OCR
+        }
         isLoadingSubtitles = false
         EngineLog.emit(
-            "[AetherEngine] overlay fed by packet-store drainer for stream=\(index) "
+            "[AetherEngine] \(nativeOnly ? "native rendition" : "overlay") selected stream=\(index) "
             + "(backfill requested)",
             category: .engine
         )
@@ -303,7 +308,9 @@ extension AetherEngine {
         subtitleResolutionLastFrontier.removeAll()   // #250
         subtitleResolutionCoverageStated.removeAll()   // #318
         subtitleDeliveryLastOutcome.removeAll()   // #357
-        cancelSubtitleForwardPrefetcher(reason: reason)   // #151
+        if subtitleOCRArmedOrdinal == nil || reason == .sessionStopped {
+            cancelSubtitleForwardPrefetcher(reason: reason)   // #151
+        }
     }
 
     /// Clear one channel's drain target; stops the loop when no channel remains active.
@@ -321,8 +328,18 @@ extension AetherEngine {
     /// #166: keep the store's aggregate-eviction protected set in sync with the active drain
     /// targets, so the coldest non-selected streams evict first and the window the drainer reads
     /// is never dropped. Called on every drain-target change and re-asserted each drain tick.
+    var subtitlePacketStreamIndices: Set<Int32> {
+        var streams = Set(subtitleDrainTargets.values)
+        if let ordinal = subtitleOCRArmedOrdinal,
+           nativeSubtitleTrackTable.indices.contains(ordinal),
+           let index = nativeSubtitleTrackTable[ordinal].sourceStreamIndex {
+            streams.insert(Int32(index))
+        }
+        return streams
+    }
+
     func refreshSubtitleStoreProtection() {
-        activeSubtitlePacketStore?.setProtectedStreams(Set(subtitleDrainTargets.values))
+        activeSubtitlePacketStore?.setProtectedStreams(subtitlePacketStreamIndices)
     }
 
     /// The synchronous tick: plan, decode and apply in one go on the MainActor. Kept for the
@@ -341,7 +358,7 @@ extension AetherEngine {
     /// decode nothing (idle, no decoder), and hands back what the decode needs.
     func prepareSubtitleDrainTick() -> SubtitleDrainTickWork? {
         guard !subtitleDrainTargets.isEmpty, let store = activeSubtitlePacketStore else { return nil }
-        store.setProtectedStreams(Set(subtitleDrainTargets.values))   // #166: re-assert protection
+        refreshSubtitleStoreProtection()   // #166: overlay and native OCR share eviction protection
         let playhead = sourceTime
         // #416: the pump is rendering the frame at the playhead, so it has necessarily read from
         // wherever it opened up to here. That is what the pump can state without a hook in its read
@@ -727,7 +744,7 @@ extension AetherEngine {
         cancelSubtitleForwardPrefetcher(reason: .prefetchRebuild)
         guard Self.shouldRunSubtitleForwardPrefetch(
             isLive: isLive,
-            hasEmbeddedDrainTargets: !subtitleDrainTargets.isEmpty,
+            hasEmbeddedDrainTargets: !subtitlePacketStreamIndices.isEmpty,
             hasSource: loadedURL != nil),
             let store = activeSubtitlePacketStore,
             let url = loadedURL else { return }
@@ -1671,6 +1688,7 @@ extension AetherEngine {
         }
         cancelSidecarTask()
         cancelSubtitleOCRWorker()   // Phase D: subtitles off = worker off (cursors persist)
+        nativeSubtitleOnly = false
         clearSubtitleDrainTarget(channel: .primary, reason: .subtitlesCleared)   // #112 rework
         activeEmbeddedSubtitleStreamIndex = -1
         activeSubtitleTrackIndex = nil
@@ -1727,14 +1745,16 @@ extension AetherEngine {
     /// session catching up over a remote link and never covered the playhead (device: readMax 48s vs playhead
     /// 304s, every .vtt served empty).
     func startNativeSubtitleReaders(url: URL, stores: [NativeSubtitleCueStore],
-                                    readToEOF: Bool = false, startAtSeconds: Double? = nil) {
+                                    readToEOF: Bool = false, startAtSeconds: Double? = nil,
+                                    selectedOrdinal: Int? = nil) {
         cancelNativeSubtitleReaders()
         nativeSubtitleReadersRunToEOF = readToEOF
         var pairs: [(streamIndex: Int32, store: NativeSubtitleCueStore)] = []
         for (ordinal, entry) in nativeSubtitleTrackTable.enumerated() {
             // Phase D: OCR ordinals are worker-fed; the reader would open a demuxer only to
             // skip their bitmap routes.
-            guard ordinal < stores.count, let src = entry.sourceStreamIndex, !entry.needsOCR else { continue }
+            guard selectedOrdinal == nil || ordinal == selectedOrdinal,
+                  ordinal < stores.count, let src = entry.sourceStreamIndex, !entry.needsOCR else { continue }
             pairs.append((Int32(src), stores[ordinal]))
         }
         guard !pairs.isEmpty else { return }
@@ -1784,13 +1804,17 @@ extension AetherEngine {
     /// is in flight, poll until it settles (bounded), then start; the pump tap keeps covering the
     /// produced region meanwhile, so only the AVKit-prefetch-burst coverage is deferred.
     func startLazyNativeSubtitleReadersWhenIdle() {
-        guard nativeSubtitleReadersTask == nil, let params = nativeSubtitleReaderParams else { return }
+        guard let ordinal = nativeSubtitleReapplyOrdinal,
+              nativeSubtitleTrackTable.indices.contains(ordinal),
+              !nativeSubtitleTrackTable[ordinal].needsOCR,
+              nativeSubtitleTrackTable[ordinal].sourceStreamIndex != nil,
+              nativeSubtitleReadersTask == nil, let params = nativeSubtitleReaderParams else { return }
         var restartBusy = nativeVideoSession?.restartInFlight == true
         #if DEBUG
         if let override = testHookRestartInFlightOverride { restartBusy = override }
         #endif
         guard restartBusy else {
-            startNativeSubtitleReaders(url: params.url, stores: params.stores)
+            startNativeSubtitleReaders(url: params.url, stores: params.stores, selectedOrdinal: ordinal)
             return
         }
         nativeSubtitleReaderDeferralTask?.cancel()
@@ -1806,10 +1830,11 @@ extension AetherEngine {
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
             guard !Task.isCancelled, let self else { return }
-            guard self.nativeSubtitleReadersTask == nil,
+            guard self.nativeSubtitleReapplyOrdinal == ordinal,
+                  self.nativeSubtitleReadersTask == nil,
                   let params = self.nativeSubtitleReaderParams else { return }
             EngineLog.emit("[AetherEngine] deferred native subtitle readers starting (restart settled)", category: .engine)
-            self.startNativeSubtitleReaders(url: params.url, stores: params.stores)
+            self.startNativeSubtitleReaders(url: params.url, stores: params.stores, selectedOrdinal: ordinal)
         }
     }
 
@@ -1964,6 +1989,7 @@ extension AetherEngine {
         var parkLogged = false
         var timeBaseCache: [Int32: AVRational] = [:]
         var totalCues = 0
+        var availabilityPublished = false
 
         readLoop: while !Task.isCancelled {
             // #240: the video path owns the link; this reader is lookahead. Same rule as the #151
@@ -2016,10 +2042,14 @@ extension AetherEngine {
                     route.store.appendCues(event.cues)
                     let hasCues = route.store.cueCount > 0  // Snapshot locally; route can't be captured in the MainActor closure (Sendable).
 
-                    if hasCues {
+                    if hasCues, !availabilityPublished {
+                        availabilityPublished = true
                         await MainActor.run { [weak self] in
-                            guard !Task.isCancelled, let self else { return }
-                            self.nativeSubtitleRenditionAvailable = true
+                            guard !Task.isCancelled, let self,
+                                  self.nativeSubtitleReadersDemuxer === demuxer else { return }
+                            if !self.nativeSubtitleRenditionAvailable {
+                                self.nativeSubtitleRenditionAvailable = true
+                            }
                         }
                     }
                 }
@@ -2116,7 +2146,8 @@ extension AetherEngine {
         guard nativeSubtitleTrackTable.indices.contains(ordinal),
               let source = nativeSubtitleTrackTable[ordinal].sourceStreamIndex
                 ?? nativeSubtitleTrackTable[ordinal].externalID else { return }
-        selectSubtitleTrack(index: source)
+        hostExplicitSubtitleAction = true
+        selectSubtitleTrack(index: source, startAt: sourceTime, nativeOnly: true)
         setNativeSubtitleSelected(track: ordinal)
     }
 
@@ -2128,6 +2159,9 @@ extension AetherEngine {
         pendingNativeSubtitleOCROrdinal = nil
         // Remembered before any guard: the #93 recovery reload replays the host's last request
         // onto the fresh item even when this call raced a not-yet-current player.
+        if nativeSubtitleReapplyOrdinal != ordinal, !nativeSubtitleReadersRunToEOF {
+            cancelNativeSubtitleReaders()
+        }
         nativeSubtitleReapplyOrdinal = ordinal
         // #15: lazy readers, run the side-demuxer only while a native track is selected (PiP), idle otherwise.
         // Sodalite#32: an eager read-to-EOF reader survives deselect (it is building whole-session coverage;
@@ -2427,6 +2461,7 @@ extension AetherEngine {
         carryover.secondarySidecarURL = (isSecondarySubtitleActive && carryover.secondaryTrackIndex == nil)
             ? loadedSecondarySidecarURL : nil
         carryover.nativeReapplyOrdinal = nativeSubtitleReapplyOrdinal
+        carryover.nativeOnly = nativeSubtitleOnly
         carryover.reapplyOrdinalMatchesActiveTrack = currentReapplyOrdinalMatchesActiveTrack()
         return carryover
     }
@@ -2466,7 +2501,7 @@ extension AetherEngine {
             postLoadSubtitleActive: isSubtitleActive
         ) {
         case .reselect(let index):
-            selectSubtitleTrack(index: index, startAt: startAt)
+            selectSubtitleTrack(index: index, startAt: startAt, nativeOnly: carryover.nativeOnly)
         case .sidecar(let url):
             startSidecarDecode(url: url, httpHeaders: nil, externalTrackID: nil)
         case .clear:

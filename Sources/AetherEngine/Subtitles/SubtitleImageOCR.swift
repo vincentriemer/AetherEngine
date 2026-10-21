@@ -98,6 +98,7 @@ enum SubtitleImageOCR {
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = level
         request.usesLanguageCorrection = true
+        request.preferBackgroundProcessing = true
         if let language,
            let supported = try? request.supportedRecognitionLanguages(),
            let match = supported.first(where: {

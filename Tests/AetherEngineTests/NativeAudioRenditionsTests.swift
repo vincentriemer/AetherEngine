@@ -74,6 +74,25 @@ struct NativeAudioRenditionsTests {
         #expect(failures.withLock { $0.count } == 2)
     }
 
+    @Test("audio children share producer priority and preserve overlapping claims")
+    func sharedProducerGate() throws {
+        let parent = HLSVideoEngine(url: URL(fileURLWithPath: "/unused"))
+        let gate = SideReaderLinkGate()
+        parent.sideReaderLinkGate = gate
+        let first = try parent.makeNativeAudioSession(index: 2, seconds: 0)
+        let second = try parent.makeNativeAudioSession(index: 7, seconds: 42)
+        defer { parent.stop(); first.stop(); second.stop() }
+        #expect(first.sideReaderLinkGate === gate)
+        #expect(second.sideReaderLinkGate === gate)
+        let sideReader = SideReaderLinkArbiter(gate: gate)
+        first.sideReaderLinkGate?.videoFetchBegan()
+        second.sideReaderLinkGate?.videoFetchBegan()
+        first.sideReaderLinkGate?.videoFetchEnded()
+        #expect(sideReader.shouldYield(inAnchorGrace: false, yieldedSeconds: 0))
+        second.sideReaderLinkGate?.videoFetchEnded()
+        #expect(!sideReader.shouldYield(inAnchorGrace: false, yieldedSeconds: 0))
+    }
+
     @Test("Recovered tracks retain lossless policy independently of other renditions")
     func fallbackPolicy() throws {
         let parent = HLSVideoEngine(url: URL(fileURLWithPath: "/unused"), audioBridgeMode: .lossless, objectAudioRendering: .apac(.l714))

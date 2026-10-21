@@ -285,6 +285,7 @@ extension HLSVideoEngine {
         child.nativeAudioSegmentPlan = segmentPlan
         child.audioDelaySeconds = audioDelaySeconds
         child.requestHeaders = requestHeaders
+        child.sideReaderLinkGate = sideReaderLinkGate
         return child
     }
 }

@@ -2422,6 +2422,7 @@ extension AetherEngine {
         // AE#464 round 2: "the current playhead" is not `currentTime` while another load is in flight,
         // which has already zeroed that clock. See `AetherEngine.rebuildPosition`.
         let resumeAt = resumeOverride ?? positionForSessionRebuild
+        let nativeOnlyToResume = nativeSubtitleOnly
         let embeddedStreamToResume: Int32 = activeEmbeddedSubtitleStreamIndex
         let sidecarToResume: URL? = isSubtitleActive && activeEmbeddedSubtitleStreamIndex < 0
             ? loadedSidecarURL
@@ -2810,7 +2811,7 @@ extension AetherEngine {
             // published selection stays on the track (the registry survives stopInternal on this
             // path); one-shot sidecar selections keep the URL-only route.
             if let active = activeTrackToResume, externalSubtitleRegistry[active] != nil {
-                selectSubtitleTrack(index: active, startAt: preSwitchSourceTime)
+                selectSubtitleTrack(index: active, startAt: preSwitchSourceTime, nativeOnly: nativeOnlyToResume)
             } else {
                 selectSidecarSubtitle(url: sidecar)
             }
@@ -2818,7 +2819,7 @@ extension AetherEngine {
             // #112 (audio-switch reanchor): pass the pre-stopInternal source PTS explicitly; the parameterless form
             // reads the live sourceTime, which has collapsed to the playlist axis here (shift reset, not yet
             // republished) and would re-arm the reader ~shift seconds behind the line.
-            selectSubtitleTrack(index: Int(embeddedStreamToResume), startAt: preSwitchSourceTime)
+            selectSubtitleTrack(index: Int(embeddedStreamToResume), startAt: preSwitchSourceTime, nativeOnly: nativeOnlyToResume)
             // #112 full umbau: re-seed the on-screen bitmap line the switch would otherwise drop. selectSubtitleTrack
             // cleared subtitleCues and spawned a fresh reader; restore the pre-switch visible cues so the line stays
             // up until the reader's reconstruction pass republishes it (its first composition trims these cleanly).
