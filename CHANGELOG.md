@@ -1,5 +1,10 @@
 # Changelog
 
+## Fork: bounded video fragment memory — 2026-10-21
+
+- Flush video-only muxer payloads at an 8 MiB budget into the current disk-backed segment. Preserve complete samples, timestamps, segment boundaries, and cache headroom. Mixed A/V interleaving and audio-only processing keep their existing policy.
+- Regression coverage remuxes real encoded video through multiple fragments and segment cuts, comparing every sample and timestamp with the unbounded control.
+
 ## Fork: native container audio renditions — 2026-10-21
 
 - Opt-in real audio-only HLS alternatives, source names and container identities for AVKit.

@@ -273,6 +273,12 @@ final class MP4SegmentMuxer {
     private var maxBufferedFragmentTicks: Int64 = 0
     /// Output-TB DTS of the first video packet since the last flush; Int64.min = no window open yet.
     private var fragmentWindowFirstVideoDts: Int64 = Int64.min
+    // Native audio renditions leave this muxer video-only. Time alone is not a memory bound:
+    // a normal high-bitrate segment retained 55.58 MiB in movenc during Akira playback.
+    // Mixed A/V keeps its existing interleave policy; flushing it by video bytes could move
+    // late audio into the wrong fragment. An oversized individual sample remains indivisible.
+    private let maxBufferedVideoBytes: Int
+    private var bufferedPayloadBytes = 0
 
     /// AE#684: the sound handed to the segment being cut, first and last packet, in
     /// `muxerAudioTimeBase`. A segment opens on a video keyframe and carries whatever audio the
@@ -306,11 +312,13 @@ final class MP4SegmentMuxer {
         audio: AudioConfig?,
         audioOnly: Bool = false,
         maxBufferedFragmentSeconds: Double = 8.0,
+        maxBufferedVideoBytes: Int = 8 * 1024 * 1024,
         audioMoovPrimeFrame: [UInt8]? = nil,
         audioDelaySeconds: Double = 0,
         onStorageExhausted: (@Sendable () -> Void)? = nil,
         onInitCaptured: @escaping (Data) -> Void
     ) throws {
+        self.maxBufferedVideoBytes = max(1, maxBufferedVideoBytes)
         self.audioOnly = audioOnly
         self.videoOutputStreamIndex = audioOnly ? -1 : 0
         self.audioOutputStreamIndex = audioOnly ? 0 : 1
@@ -754,7 +762,14 @@ final class MP4SegmentMuxer {
         // av_write_frame was tried as a leak hypothesis; no impact on 8 MB/s mallocMB growth
         // (leak was Data(d) dispatch_data aliasing in AVIOReader). Reverted to interleaved for
         // cross-stream DTS monotonicity and audio+video re-ordering via libavformat.
+        let payloadBytes = Int(max(0, packet.pointee.size))
+        if !haveAudio, bufferedPayloadBytes > 0,
+           payloadBytes > maxBufferedVideoBytes - min(bufferedPayloadBytes, maxBufferedVideoBytes) {
+            flushPendingFragment()
+            fragmentWindowFirstVideoDts = packet.pointee.dts
+        }
         let rc = av_interleaved_write_frame(ctx, packet)
+        if rc >= 0 { bufferedPayloadBytes += payloadBytes }
 
         // EAC3/AC-3/TrueHD moov-wedge guard (#92 follow-up). Under +delay_moov the first fragment flush
         // writes moov lazily, and FFmpeg's mp4 muxer can only build the AC-3/E-AC-3/TrueHD dac3/dec3/dmlp
@@ -803,6 +818,7 @@ final class MP4SegmentMuxer {
         if audioNeedsParsedPacketForMoov, !audioPacketWritten, !moovFlushed { return }
         _ = av_interleaved_write_frame(ctx, nil)
         _ = av_write_frame(ctx, nil)
+        bufferedPayloadBytes = 0
         if !moovFlushed {
             moovFlushed = true
             _ = av_write_frame(ctx, nil)
@@ -866,6 +882,7 @@ final class MP4SegmentMuxer {
         // interleaver before mov_write_moov looks for its parsed bitstream.
         _ = av_interleaved_write_frame(ctx, nil)
         _ = av_write_frame(ctx, nil)
+        bufferedPayloadBytes = 0
         moovFlushed = true
         _ = av_write_frame(ctx, nil)
         audioPacketWritten = true
@@ -925,6 +942,7 @@ final class MP4SegmentMuxer {
         // missing per segment for matroska audio-leads-video sources, ~120 ms short of #EXTINF).
         _ = av_interleaved_write_frame(ctx, nil)
         _ = av_write_frame(ctx, nil)
+        bufferedPayloadBytes = 0
         if !moovFlushed {
             moovFlushed = true
             _ = av_write_frame(ctx, nil)
@@ -989,6 +1007,7 @@ final class MP4SegmentMuxer {
         // above it, movenc's get_cluster_duration aborts the process (StreamX crash 2026-10-10).
         _ = av_interleaved_write_frame(ctx, nil)
         _ = av_write_frame(ctx, nil)
+        bufferedPayloadBytes = 0
         _ = av_write_trailer(ctx)
 
         let finalPath = currentStagingPath
