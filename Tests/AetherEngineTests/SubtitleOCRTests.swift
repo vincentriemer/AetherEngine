@@ -65,6 +65,20 @@ struct SubtitleOCRTests {
         let text = try #require(recognized)
         #expect(text.contains("HELLO"))
         #expect(text.contains("123"))
+        let store = NativeSubtitleCueStore()
+        let bitmap = SubtitleImage(cgImage: image, position: .zero,
+                                   canvasSize: CGSize(width: width, height: height))
+        await SubtitleImageOCR.appendRecognized(cues: [
+            SubtitleCue(id: 1, startTime: 10, endTime: 12, body: .image(bitmap))
+        ], language: "eng", to: store)
+        let cues = store.cuesInWindow(start: 9, end: 13)
+        #expect(cues.count == 1)
+        #expect(cues.first?.start == 10)
+        #expect(cues.first?.end == 12)
+        let vtt = WebVTTBuilder.body(cues: cues)
+        #expect(vtt.contains("HELLO"))
+        #expect(vtt.contains("123"))
+        #expect(vtt.contains("00:00:10.000 --> 00:00:12.000"))
     }
 
     /// #552: the accurate model is an OPTIONAL system model. On macOS 27 it spends about a minute

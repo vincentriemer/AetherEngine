@@ -1442,6 +1442,10 @@ public final class AetherEngine: ObservableObject {
     /// when `LoadOptions.prepareNativeSubtitles` is set; empty otherwise. Cleared on stop/load.
     /// Hosts use this to populate a picker and call `setNativeSubtitleSelected(track:)`.
     @Published public internal(set) var nativeSubtitleTracks: [NativeSubtitleTrack] = []
+    /// One owned selection, including cue prefill. Retired requests must never reselect after Off.
+    var nativeSubtitleSelectionTask: Task<Void, Never>?
+    /// A cold Vision model may outlast prefill. Retry only when that still-selected OCR store fills.
+    var pendingNativeSubtitleOCROrdinal: Int?
 
     /// Ordinal of the native subtitle rendition marked DEFAULT=YES in the master, resolved from
     /// `LoadOptions.preferredSubtitleLanguages` (fallback 0). A programmatically-selected legible track only
@@ -4295,6 +4299,9 @@ public final class AetherEngine: ObservableObject {
         setPendingRecoverySeekTarget(nil)
         nativeSubtitleTrackTable = []
         nativeSubtitleReapplyOrdinal = nil
+        nativeSubtitleSelectionTask?.cancel()
+        nativeSubtitleSelectionTask = nil
+        pendingNativeSubtitleOCROrdinal = nil
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         metadata = nil
@@ -7907,6 +7914,9 @@ public final class AetherEngine: ObservableObject {
         isLoadingSubtitles = false
         nativeSubtitleTrackTable = []
         nativeSubtitleReapplyOrdinal = nil
+        nativeSubtitleSelectionTask?.cancel()
+        nativeSubtitleSelectionTask = nil
+        pendingNativeSubtitleOCROrdinal = nil
         nativeSubtitleTracks = []
         nativeSubtitleReaderParams = nil
         cancelNativeSubtitleReaders()

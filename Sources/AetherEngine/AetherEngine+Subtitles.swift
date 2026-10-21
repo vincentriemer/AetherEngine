@@ -2104,8 +2104,28 @@ extension AetherEngine {
     }
 
 
-    /// Select or deselect the native mov_text track by ordinal (#55). nil deselects all. Matches by `extendedLanguageTag` first (language-rank-aware for same-language duplicates), falls back to positional index. No-op when no legible group or ordinal out of range.
+    /// Select a native rendition and its actual source track. Bitmap choices arm on-device OCR;
+    /// nil stops subtitle work and deselects. Hosts render only AVPlayer's legible output.
+    /// The rendition table owns source identity; language and menu position are never source ids.
+    public func selectNativeSubtitle(track ordinal: Int?) {
+        guard let ordinal else {
+            clearSubtitle()
+            setNativeSubtitleSelected(track: nil)
+            return
+        }
+        guard nativeSubtitleTrackTable.indices.contains(ordinal),
+              let source = nativeSubtitleTrackTable[ordinal].sourceStreamIndex
+                ?? nativeSubtitleTrackTable[ordinal].externalID else { return }
+        selectSubtitleTrack(index: source)
+        setNativeSubtitleSelected(track: ordinal)
+    }
+
+    /// Select or deselect a prepared native rendition by ordinal. This low-level call does not
+    /// activate its source decoder; hosts selecting bitmap tracks should use selectNativeSubtitle.
     public func setNativeSubtitleSelected(track ordinal: Int?) {
+        nativeSubtitleSelectionTask?.cancel()
+        nativeSubtitleSelectionTask = nil
+        pendingNativeSubtitleOCROrdinal = nil
         // Remembered before any guard: the #93 recovery reload replays the host's last request
         // onto the fresh item even when this call raced a not-yet-current player.
         nativeSubtitleReapplyOrdinal = ordinal
@@ -2120,12 +2140,13 @@ extension AetherEngine {
         guard let item = currentAVPlayer?.currentItem else { return }
         // Capture track list; avoid capturing self to keep MainActor re-entrancy to one hop.
         let tracks = nativeSubtitleTracks
-        Task { @MainActor in
+        nativeSubtitleSelectionTask = Task { @MainActor in
             // #15: with automatic media-selection criteria on (the default), AVKit can override/not-render an
             // explicit legible selection until a view refresh. Pin manual selection so the explicit choice
             // renders immediately and survives.
             currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
-            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else { return }
+            guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
+                  isCurrentNativeSubtitleSelection(item, ordinal: ordinal) else { return }
             guard !group.options.isEmpty else { return }
             guard let ordinal else {
                 item.select(nil, in: group)
@@ -2174,6 +2195,7 @@ extension AetherEngine {
                 let began = Date()
                 var exit = "target"
                 while store.readMaxCueEnd() < target, Date() < deadline {
+                    guard isCurrentNativeSubtitleSelection(item, ordinal: ordinal) else { return }
                     let m = store.readMaxCueEnd()
                     if m > lastMax {
                         lastMax = m
@@ -2192,6 +2214,7 @@ extension AetherEngine {
                 EngineLog.emit("[AetherEngine] native subtitle pre-fill done: readMax=\(String(format: "%.1f", store.readMaxCueEnd())) target=\(String(format: "%.1f", target)) cues=\(store.cueCount) exit=\(exit) waited=\(waited)ms readersRunning=\(nativeSubtitleReadersTask != nil)", category: .engine)
                 prefilledCues = store.cueCount
             }
+            guard isCurrentNativeSubtitleSelection(item, ordinal: ordinal) else { return }
             // Sodalite#156: never hand AVKit an EMPTY rendition. The comment above says why the
             // pre-fill exists; this is the half that was missing, and without it the pre-fill is
             // advice rather than a gate. AVKit fetches the whole forward window in one burst at
@@ -2209,6 +2232,10 @@ extension AetherEngine {
             // and only the refusal can be retried. `nativeSubtitleReapplyOrdinal` is set before this
             // runs, so the readers' own re-anchor re-selects once coverage reaches the playhead.
             if prefilledCues == 0 {
+                if nativeSubtitleTrackTable.indices.contains(ordinal),
+                   nativeSubtitleTrackTable[ordinal].needsOCR {
+                    pendingNativeSubtitleOCROrdinal = ordinal
+                }
                 EngineLog.emit("[AetherEngine] native subtitle select refused: rendition ordinal=\(ordinal) "
                                + "is empty at the playhead, and AVKit caches what it is handed. "
                                + "Leaving it deselected; the readers' re-anchor retries once it has cues",
@@ -2223,6 +2250,7 @@ extension AetherEngine {
             EngineLog.emit("[AetherEngine] native subtitle select: item=\(itemID) opt=\(option.displayName) groupOpts=\(group.options.count) criteriaAuto=\(currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically ?? true) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
             item.select(nil, in: group)
             try? await Task.sleep(nanoseconds: 100_000_000)
+            guard isCurrentNativeSubtitleSelection(item, ordinal: ordinal) else { return }
             item.select(option, in: group)
             let after = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
             EngineLog.emit("[AetherEngine] native subtitle select done: selected=\(after) itemIsCurrent=\(currentAVPlayer?.currentItem === item)", category: .engine)
@@ -2235,11 +2263,17 @@ extension AetherEngine {
                   currentAVPlayer?.currentItem === item {
                 retries += 1
                 try? await Task.sleep(nanoseconds: 700_000_000)
+                guard isCurrentNativeSubtitleSelection(item, ordinal: ordinal) else { return }
                 item.select(option, in: group)
                 let retried = item.currentMediaSelection.selectedMediaOption(in: group)?.displayName ?? "nil"
                 EngineLog.emit("[AetherEngine] native subtitle select retry #\(retries): selected=\(retried)", category: .engine)
             }
         }
+    }
+
+    private func isCurrentNativeSubtitleSelection(_ item: AVPlayerItem, ordinal: Int?) -> Bool {
+        !Task.isCancelled && currentAVPlayer?.currentItem === item
+            && nativeSubtitleReapplyOrdinal == ordinal
     }
 
     /// #88: ordinal of the table entry backing an active track id: embedded ids match

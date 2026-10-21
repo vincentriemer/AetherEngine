@@ -476,8 +476,14 @@ engine.$nativeSubtitleRenditionsServed     // @Published var Bool
 // ordered list of all native subtitle renditions (ordinal, language tag, display name)
 engine.$nativeSubtitleTracks               // @Published var [NativeSubtitleTrack]
 
+// Native-player hosts: select the actual source and its native rendition together.
+// Bitmap choices arm the selected source's on-device OCR worker; nil stops subtitle work.
+// Source identity comes from the rendition table, never a language or menu-position guess.
+engine.selectNativeSubtitle(track: ordinal) // Int?; nil is Off
+
 // select a rendition by ordinal (nil deselects); language-tag match, positional fallback.
 // Re-asserts automatically if AVFoundation drops the selection during a stall recovery.
+// Low-level: source activation is separate; use selectNativeSubtitle for bitmap choices.
 engine.setNativeSubtitleSelected(track ordinal: Int?)
 
 // convenience for the enter/leave pattern below: true resolves the rendition matching the

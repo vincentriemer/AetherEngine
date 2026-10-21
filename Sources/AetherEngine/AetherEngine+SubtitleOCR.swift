@@ -33,12 +33,25 @@ extension AetherEngine {
                 if !batch.isEmpty {
                     await SubtitleImageOCR.appendRecognized(cues: batch, language: language, to: store)
                     await MainActor.run {
-                        if !Task.isCancelled { self.subtitleOCRBatchInFlight = false }
+                        if !Task.isCancelled {
+                            self.subtitleOCRBatchInFlight = false
+                            self.nativeSubtitleOCRDidFill(ordinal: ordinal)
+                        }
                     }
                 }
                 try? await Task.sleep(nanoseconds: AetherEngine.subtitleDrainTickNanoseconds)
             }
         }
+    }
+
+    /// Selection may have refused an empty rendition while Vision warmed up. Only real cue
+    /// arrival can retry it, and only while the viewer still wants this exact rendition.
+    func nativeSubtitleOCRDidFill(ordinal: Int) {
+        guard pendingNativeSubtitleOCROrdinal == ordinal,
+              nativeSubtitleReapplyOrdinal == ordinal,
+              nativeStore(atOrdinal: ordinal)?.cueCount ?? 0 > 0 else { return }
+        pendingNativeSubtitleOCROrdinal = nil
+        setNativeSubtitleSelected(track: ordinal)
     }
 
     /// Completed coverage survives a re-arm; an abandoned batch must be collected again.
@@ -158,7 +171,12 @@ extension AetherEngine {
         EngineLog.emit("[SubtitleOCR] sidecar fill starting: track=\(id) cues=\(cues.count)", category: .engine)
         subtitleOCRSidecarFillTask = BlockingWork.detached(priority: .utility) {
             await SubtitleImageOCR.appendRecognized(cues: cues, language: language, to: store)
-            if !Task.isCancelled { store.markFinished() }
+            if !Task.isCancelled {
+                store.markFinished()
+                await MainActor.run { [weak self] in
+                    if !Task.isCancelled { self?.nativeSubtitleOCRDidFill(ordinal: ordinal) }
+                }
+            }
         }
     }
 }
