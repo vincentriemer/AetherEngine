@@ -910,6 +910,16 @@ extension AetherEngine {
                 self.followAtmosOutput()
             }
         }
+        session.onNativeAudioFailed = { [weak self, weak session] index, epoch in
+            Task { @MainActor in
+                guard let self, let session, self.nativeVideoSession === session,
+                      session.applyNativeAudioFailure(index: index, epoch: epoch) else { return }
+                self.activeAudioTrackIndex = index
+                self.recomputeAudioDelivery()
+                self.publishError(PlaybackErrorInfo(kind: .audioTrackSwitchFailed,
+                    message: "Native audio rendition could not start"))
+            }
+        }
         session.audioDelaySeconds = loadedOptions.audioDelaySeconds
         session.servesSegmentsProgressively = loadedOptions.progressiveSegmentDelivery
         // #240: the pump claims the source link through this gate while it is fetching, so the

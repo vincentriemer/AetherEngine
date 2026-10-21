@@ -1,5 +1,6 @@
 @testable import AetherEngine
 import Foundation
+import Synchronization
 import Testing
 
 @Suite("Native container audio renditions", .serialized)
@@ -24,6 +25,53 @@ struct NativeAudioRenditionsTests {
         #expect(rendition.response(path: "/audio_names.json") != nil)
         #expect(rendition.response(path: "/audio_11/media.m3u8") != nil)
         #expect(rendition.response(path: "/audio_99/media.m3u8") == nil)
+    }
+
+    @Test("A retired failure epoch cannot match a later selection of the same stream")
+    func failureEpoch() {
+        let rendition = NativeAudioRenditions(tracks: tracks, names: [:], initial: 2,
+                                              plan: [], makeSession: { _, _ in throw CancellationError() }, activated: { _, _ in })
+        defer { rendition.stop() }
+        let parent = HLSVideoEngine(url: URL(fileURLWithPath: "/unused"))
+        parent.nativeAudioRenditions = rendition
+        defer { parent.stop() }
+        let failedEpoch = rendition.selectionEpoch
+        #expect(parent.applyNativeAudioFailure(index: 2, epoch: failedEpoch))
+        rendition.select(7)
+        rendition.select(2)
+        #expect(rendition.selectedIndex == 2)
+        #expect(rendition.selectionEpoch != failedEpoch)
+        #expect(!parent.applyNativeAudioFailure(index: 2, epoch: failedEpoch))
+        let activeEpoch = rendition.selectionEpoch
+        rendition.stop()
+        #expect(rendition.selectionEpoch != activeEpoch)
+        #expect(!parent.applyNativeAudioFailure(index: 2, epoch: activeEpoch))
+    }
+
+    @Test("Late source failure callbacks are rejected after switching away and back or stopping")
+    func staleSourceFailure() {
+        let failures = Mutex<[(Int, Int)]>([])
+        let opened = Mutex<HLSVideoEngine?>(nil)
+        let rendition = NativeAudioRenditions(tracks: tracks, names: [:], initial: 2, plan: [],
+                                              makeSession: { _, _ in
+                                                  let session = HLSVideoEngine(url: URL(fileURLWithPath: "/nonexistent-native-audio-fixture"))
+                                                  opened.withLock { $0 = session }
+                                                  return session
+                                              }, activated: { _, _ in }, failed: { index, epoch in failures.withLock { $0.append((index, epoch)) } })
+        defer { rendition.stop(waitForCleanup: true) }
+        #expect(rendition.response(path: "/audio_2/init.mp4") == nil)
+        let oldFailure = opened.withLock { $0?.onVODSourceFailed }
+        #expect(failures.withLock { $0.count } == 1)
+        rendition.select(7)
+        rendition.select(2)
+        oldFailure?(-1, "Retired source failed", .vodSourceFailed)
+        #expect(failures.withLock { $0.count } == 1)
+        #expect(rendition.response(path: "/audio_2/init.mp4") == nil)
+        #expect(failures.withLock { $0.count == 2 && $0[0].1 != $0[1].1 })
+        let currentFailure = opened.withLock { $0?.onVODSourceFailed }
+        rendition.stop(waitForCleanup: true)
+        currentFailure?(-1, "Stopped source failed", .vodSourceFailed)
+        #expect(failures.withLock { $0.count } == 2)
     }
 
     @Test("Recovered tracks retain lossless policy independently of other renditions")

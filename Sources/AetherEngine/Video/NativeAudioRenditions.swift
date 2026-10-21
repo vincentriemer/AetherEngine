@@ -20,7 +20,7 @@ final class NativeAudioRenditions: @unchecked Sendable {
     private let plan: [HLSVideoEngine.Segment]
     private let initial: Int?
     private let makeSession: @Sendable (Int, Double) throws -> HLSVideoEngine
-    private let failed: @Sendable (Int) -> Void
+    private let failed: @Sendable (Int, Int) -> Void
     private let activated: @Sendable (Int, HLSVideoEngine) -> Void
     private let condition = NSCondition()
     private let worker = DispatchQueue(label: "AetherEngine.native-audio-rendition")
@@ -36,7 +36,7 @@ final class NativeAudioRenditions: @unchecked Sendable {
          rendering: ObjectAudioRendering = .off, losslessTracks: Set<Int> = [],
          makeSession: @escaping @Sendable (Int, Double) throws -> HLSVideoEngine,
          activated: @escaping @Sendable (Int, HLSVideoEngine) -> Void,
-         failed: @escaping @Sendable (Int) -> Void = { _ in })
+         failed: @escaping @Sendable (Int, Int) -> Void = { _, _ in })
     {
         self.tracks = tracks.map { track in
             let base = names[track.id] ?? track.name
@@ -101,6 +101,11 @@ final class NativeAudioRenditions: @unchecked Sendable {
         // Only cancellation here. Destruction is serialized with responses on the worker.
         old?.nativeAudioSourceReader?.reader.cancel()
         old?.demuxer?.markClosed()
+    }
+
+    var selectionEpoch: Int {
+        condition.lock(); defer { condition.unlock() }
+        return epoch
     }
 
     var selectedIndex: Int? {
@@ -171,10 +176,13 @@ final class NativeAudioRenditions: @unchecked Sendable {
             guard current(index, generation) else { return nil }
             do {
                 if childID != index || childEpoch != generation {
-                    guard retireChild() else { failed(index); return nil }
+                    guard retireChild() else { reportFailure(index, generation); return nil }
                     guard current(index, generation) else { return nil }
                     condition.lock(); let start = seconds; condition.unlock()
                     let session = try makeSession(index, segment.map { plan[$0].startSeconds } ?? start)
+                    session.onVODSourceFailed = { [weak self] _, _, _ in
+                        self?.reportFailure(index, generation)
+                    }
                     condition.lock(); child = session; condition.unlock()
                     guard current(index, generation) else { retireChild(); return nil }
                     try session.prepare()
@@ -209,17 +217,22 @@ final class NativeAudioRenditions: @unchecked Sendable {
                     }
                 }
                 if current(index, generation) {
-                    failed(index)
+                    reportFailure(index, generation)
                 }
                 return nil
             } catch {
                 retireChild()
                 if current(index, generation) {
-                    failed(index)
+                    reportFailure(index, generation)
                 }
                 return nil
             }
         }
+    }
+
+    private func reportFailure(_ index: Int, _ generation: Int) {
+        guard current(index, generation) else { return }
+        failed(index, generation)
     }
 
     private func current(_ index: Int, _ generation: Int) -> Bool {
@@ -272,9 +285,6 @@ extension HLSVideoEngine {
         child.nativeAudioSegmentPlan = segmentPlan
         child.audioDelaySeconds = audioDelaySeconds
         child.requestHeaders = requestHeaders
-        child.onVODSourceFailed = { [weak self] code, reason, kind in
-            self?.surfaceVODSourceFailure(code, reason, kind: kind)
-        }
         return child
     }
 }

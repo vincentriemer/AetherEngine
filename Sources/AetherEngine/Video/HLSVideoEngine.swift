@@ -114,6 +114,16 @@ public final class HLSVideoEngine: @unchecked Sendable {
     var nativeAudioSegmentPlan: [Segment]?
     var nativeAudioSourceReader: (reader: IOReader, formatHint: String?)?
     var onNativeAudioActivated: (@Sendable (Int) -> Void)?
+    var onNativeAudioFailed: (@Sendable (Int, Int) -> Void)?
+
+    /// Applied on the engine actor only after the queued event still names this selection.
+    func applyNativeAudioFailure(index: Int, epoch: Int) -> Bool {
+        guard let renditions = nativeAudioRenditions, renditions.selectedIndex == index,
+              renditions.selectionEpoch == epoch else { return false }
+        activeAudioSourceStreamIndex = Int32(index)
+        audioDelivery = .droppedNoPipeline
+        return true
+    }
     let nativeLiveDVRPolicy = LiveDVRRetentionPolicy() // shared native retention contract; internal for integration witnesses
     private let liveRetentionQueue = DispatchQueue(label: "com.aetherengine.live-retention", qos: .utility)
     private var liveRetentionScheduled = false // restartLock; at most one pending I/O job
@@ -2270,10 +2280,8 @@ public final class HLSVideoEngine: @unchecked Sendable {
                     self.audioIsAtmosStreamCopy = child.audioIsAtmosStreamCopy
                     self.audioIsConfirmedDTSX = child.audioIsConfirmedDTSX
                     self.onNativeAudioActivated?(index)
-                }, failed: { [weak self] index in
-                    self?.activeAudioSourceStreamIndex = Int32(index)
-                    self?.audioDelivery = .droppedNoPipeline
-                    self?.surfaceVODSourceFailure(-1, "Native audio rendition could not start", kind: .audioTrackSwitchFailed)
+                }, failed: { [weak self] index, epoch in
+                    self?.onNativeAudioFailed?(index, epoch)
                 })
             prov.nativeAudioRenditions = nativeAudioRenditions
         }
