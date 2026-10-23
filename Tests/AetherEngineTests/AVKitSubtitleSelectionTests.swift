@@ -55,6 +55,8 @@ struct AVKitSubtitleSelectionTests {
             }
             let item = try #require(engine.currentAVPlayerItem)
             let group = try #require(try await item.asset.loadMediaSelectionGroup(for: .legible))
+            #expect(engine.nativeSubtitleTracks.count == 2)
+            #expect(Set(engine.nativeSubtitleTracks.compactMap(\.sourceID)).count == 2)
             for _ in 0 ..< 200 {
                 if engine.nativeLegibleDeselectPinObserver != nil, engine.avKitSubtitlePendingPolicy == nil {
                     break
@@ -73,6 +75,7 @@ struct AVKitSubtitleSelectionTests {
             let policy = engine.nativeSubtitleSelectionPolicy
             guard case let .track(source) = policy else { Issue.record("Native selection failed to activate the engine source"); return }
             #expect(engine.activeSubtitleTrackIndex == source)
+            #expect(engine.nativeSubtitleTracks.first { $0.sourceID == source }?.ordinal == engine.nativeSubtitleResolvedOrdinal)
             let audio = engine.nativeVideoSession?.nativeAudioRenditions?.selectedIndex
             #expect(audio == 3)
             let audioGroup = try #require(try await item.asset.loadMediaSelectionGroup(for: .audible))

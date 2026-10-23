@@ -1,11 +1,18 @@
 // Sources/AetherEngine/Subtitles/NativeSubtitleCueStore.swift
 import Foundation
 
-/// A native mov_text subtitle track exposed to hosts after load (#55). `ordinal` is the 0-based index into the muxer's text tracks and matches the `group.options` position in the AVPlayer legible group. `language` is the ISO 639 tag (nil when absent); `displayName` is the locale display name of `language`, or "Subtitle <n>" fallback.
+/// A native subtitle rendition. Use `sourceID` for source selection and session carryover;
+/// `ordinal` is only the engine's rendition-table index, never an AVFoundation option index.
 public struct NativeSubtitleTrack: Sendable, Equatable {
     public let ordinal: Int
     public let language: String?
     public let displayName: String
+    public let sourceID: Int?
+
+    init(ordinal: Int, language: String?, displayName: String, sourceID: Int? = nil) {
+        self.ordinal = ordinal; self.language = language; self.displayName = displayName
+        self.sourceID = sourceID
+    }
 
     /// Count of tracks in `tracks[0..<ordinal]` sharing `tracks[ordinal]`'s language; used by `setNativeSubtitleSelected` to disambiguate same-language AVMediaSelectionOptions (e.g. eng "Full" vs eng "SDH"). Returns 0 when out of range or no language.
     public static func sameLanguageRank(of ordinal: Int, in tracks: [NativeSubtitleTrack]) -> Int {

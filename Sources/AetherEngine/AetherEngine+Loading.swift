@@ -1259,7 +1259,9 @@ extension AetherEngine {
         let renditionInfos = Array(combinedInfos.prefix(nativeSubtitleTrackTable.count))
         let bitmapInfos = Array(combinedInfos.suffix(bitmapEntries.count))
         nativeSubtitleTracks = renditionInfos.enumerated().map { ordinal, info in
-            NativeSubtitleTrack(ordinal: ordinal, language: info.language, displayName: info.name)
+            let entry = nativeSubtitleTrackTable[ordinal]
+            return NativeSubtitleTrack(ordinal: ordinal, language: info.language, displayName: info.name,
+                                       sourceID: entry.sourceStreamIndex ?? entry.externalID)
         }
         let hasTextSubtitleTrack = !nativeSubtitleTrackTable.isEmpty
         // #98: an in-band CEA-608 track (no text track needed) also warrants the native path so its
@@ -1320,7 +1322,8 @@ extension AetherEngine {
                 nativeSubtitleTrackTable.append(
                     NativeSubtitleTrackEntry(sourceStreamIndex: ccTrack.id, language: ccTrack.language))
                 nativeSubtitleTracks.append(
-                    NativeSubtitleTrack(ordinal: ccOrdinal, language: ccTrack.language, displayName: ccName))
+                    NativeSubtitleTrack(ordinal: ccOrdinal, language: ccTrack.language, displayName: ccName,
+                                        sourceID: ccTrack.id))
             }
             // Phase D: append the bitmap OCR renditions last. Stores stay empty until the OCR
             // worker (embedded) or the sidecar OCR fill (external .sup) recognizes cues. The tap
@@ -1334,7 +1337,8 @@ extension AetherEngine {
                 session.nativeSubtitleSourceStreamIndicesForSession.append(nil)
                 nativeSubtitleTrackTable.append(entry)
                 nativeSubtitleTracks.append(NativeSubtitleTrack(
-                    ordinal: ordinal, language: entry.language, displayName: bitmapInfos[i].name))
+                    ordinal: ordinal, language: entry.language, displayName: bitmapInfos[i].name,
+                    sourceID: entry.sourceStreamIndex ?? entry.externalID))
             }
             // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
             // one whole-program .vtt (the AVPlayer-reliable shape). VOD only (a live program has no fixed end).
