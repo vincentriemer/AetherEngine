@@ -1245,7 +1245,7 @@ extension AetherEngine {
             NativeSubtitleTrackEntry(sourceStreamIndex: track.isExternal ? nil : track.id,
                                      externalID: track.isExternal ? track.id : nil,
                                      language: track.language,
-                                     isForced: track.isForced)
+                                     isForced: track.isForced, isHearingImpaired: track.isHearingImpaired)
         }
         // Rendition metadata built ONCE (unique NAMEs + FORCED); the published track list and the
         // master's EXT-X-MEDIA tags must agree, and duplicate names collapse AVFoundation's
@@ -1255,7 +1255,7 @@ extension AetherEngine {
         // over text+bitmap together: a same-language pair must get the numbered suffix, or
         // AVFoundation collapses the legible options.
         let bitmapEntries = Self.bitmapOCRSubtitleEntries(from: subtitleTracks, isLive: loadedOptions.isLive)
-        let combinedInfos = Self.nativeSubtitleRenditionInfos(for: nativeSubtitleTrackTable + bitmapEntries)
+        let combinedInfos = Self.nativeSubtitleRenditionInfos(for: nativeSubtitleTrackTable + bitmapEntries, avKitOwned: loadedOptions.nativeSubtitleSelectionByAVKit)
         let renditionInfos = Array(combinedInfos.prefix(nativeSubtitleTrackTable.count))
         let bitmapInfos = Array(combinedInfos.suffix(bitmapEntries.count))
         nativeSubtitleTracks = renditionInfos.enumerated().map { ordinal, info in
@@ -1315,7 +1315,7 @@ extension AetherEngine {
                 session.nativeSubtitleCueStoresForSession.append(ccStore)
                 session.nativeSubtitleLanguagesForSession.append(ccTrack.language)
                 session.nativeSubtitleRenditionInfosForSession.append(
-                    NativeSubtitleRenditionInfo(language: ccTrack.language, name: ccName, isForced: false))
+                    NativeSubtitleRenditionInfo(language: ccTrack.language, name: ccName, isForced: false, avKitOwned: loadedOptions.nativeSubtitleSelectionByAVKit, selectionID: NativeSubtitlePolicy.characteristic(ccTrack.id), isHearingImpaired: ccTrack.isHearingImpaired))
                 session.nativeSubtitleSourceStreamIndicesForSession.append(Int32(ccTrack.id))
                 nativeSubtitleTrackTable.append(
                     NativeSubtitleTrackEntry(sourceStreamIndex: ccTrack.id, language: ccTrack.language))
@@ -2470,7 +2470,7 @@ extension AetherEngine {
         // transport beside it.
         positionUnderReconstruction = resumeAt
         transportIntentUnderReconstruction = resumesPlaying
-        let previousAudioIndex = activeAudioTrackIndex
+        let previousAudioIndex = nativeVideoSession?.nativeAudioRenditions?.selectedIndex ?? activeAudioTrackIndex
         // Snapshot before stopInternal wipes state. Must reload on the same backend: loadNative on a SW-routed AV1 source throws unsupportedCodec (HLSVideoEngine only accepts HEVC / H.264 / VP9 / probed-AV1).
         let wasOnSoftwarePath = (playbackBackend == .software)
         // AE#461 follow-up: which host this rebuild hands the source to. This used to be
@@ -2806,7 +2806,7 @@ extension AetherEngine {
         }
 
         // Re-arm subtitle: sidecar branch wins because loadedSidecarURL is set only for sidecar sources.
-        if let sidecar = sidecarToResume {
+        if !loadedOptions.nativeSubtitleSelectionByAVKit, let sidecar = sidecarToResume {
             // #170: an active external track (#88) re-arms through its synthetic id so the
             // published selection stays on the track (the registry survives stopInternal on this
             // path); one-shot sidecar selections keep the URL-only route.
@@ -2815,7 +2815,7 @@ extension AetherEngine {
             } else {
                 selectSidecarSubtitle(url: sidecar)
             }
-        } else if embeddedStreamToResume >= 0 {
+        } else if !loadedOptions.nativeSubtitleSelectionByAVKit, embeddedStreamToResume >= 0 {
             // #112 (audio-switch reanchor): pass the pre-stopInternal source PTS explicitly; the parameterless form
             // reads the live sourceTime, which has collapsed to the playlist axis here (shift reset, not yet
             // republished) and would re-arm the reader ~shift seconds behind the line.
@@ -2836,7 +2836,7 @@ extension AetherEngine {
         // #170: replay the native-rendition pick onto the rebuilt item, the way the #65 recovery
         // does; the table was rebuilt from the preserved track list, so a rendering-derived
         // ordinal recomputes to the same rendition and a host-positional one replays as-is.
-        if let ordinal = Self.nativeOrdinalToReplay(
+        if !loadedOptions.nativeSubtitleSelectionByAVKit, let ordinal = Self.nativeOrdinalToReplay(
             previousOrdinal: reapplyOrdinalToRestore,
             matchesActiveTrack: reapplyMatchesActiveTrack,
             previousActiveTrack: activeTrackToResume,

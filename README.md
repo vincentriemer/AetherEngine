@@ -715,3 +715,9 @@ Being dynamic is not the same as being reached. The engine calls `avcodec_*` as 
 ### ATVPlayer fork: video fragment memory
 
 Video-only muxers flush accumulated payloads to the current segment file before the next sample would exceed 8 MiB. A single sample larger than the budget remains intact. This bounds the intermediate payload, not the disk-backed forward cache or AVPlayer buffer. Mixed audio/video muxers retain their existing time-based interleave policy. The October 21 Apple TV capture attributed a 55.58 MiB retained allocation to the video-write path before this repair; lower device memory and remote latency still require a capture of the repaired build.
+
+### AVKit-owned subtitle selection (fork extension)
+
+Set `LoadOptions.nativeSubtitleSelectionByAVKit = true` with `prepareNativeSubtitles` for native-only presentation. This opt-in leaves legacy overlay/PiP consumers unchanged. AVPlayer applies system media-selection criteria; source-backed HLS characteristics identify each legible option, including same-language text and bitmap/OCR alternatives. Language, forced and accessibility metadata come from the probe. HLS localized rendition names preserve distinct source labels.
+
+`nativeSubtitleSelectionPolicy` distinguishes automatic selection from explicit Off and `.track(sourceID)`. `nativeSubtitleResolvedOrdinal` reports the current rendition without converting an automatic result into a manual override. Item-owned observation activates only the selected reader/OCR worker, cancels retired work, and reapplies policy after replacement. Automatic captions retain explicit source audio selection. Use `setNativeSubtitlePolicy` to restore session intent; new sessions default to automatic in this mode. OCR remains on-device, lossy text recognition rendered through WebVTT.

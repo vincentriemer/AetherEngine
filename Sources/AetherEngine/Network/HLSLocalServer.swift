@@ -107,7 +107,9 @@ protocol HLSSegmentProvider: AnyObject {
     /// and the /subs_{N} endpoints. Empty unless prepareNativeSubtitles is on and the cue stores are threaded.
     /// NAMEs must be unique within the group (duplicates collapse AVFoundation's legible options).
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { get }
-    /// Ordinal advertised as DEFAULT=YES in the master SUBTITLES group (Sodalite#32).
+    /// Opt-in automatic-selection metadata, keyed by the same source-backed rendition ordinal.
+    func nativeSubtitleSelectionInfo(ordinal: Int) -> NativeSubtitleRenditionInfo?
+    /// Legacy preferred rendition ordinal.
     var nativeSubtitleDefaultOrdinal: Int { get }
     /// Serve the SUBTITLES rendition as one whole-program .vtt (single VOD segment) instead of per-video-segment (Sodalite#32).
     var nativeSubtitleWholeProgram: Bool { get }
@@ -198,6 +200,7 @@ extension HLSSegmentProvider {
     var nativeAudioRenditions: NativeAudioRenditions? { nil }
     var masterAudioChannels: String? { nil }
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] { [] }
+    func nativeSubtitleSelectionInfo(ordinal: Int) -> NativeSubtitleRenditionInfo? { nil }
     var nativeSubtitleDefaultOrdinal: Int { 0 }
     var nativeSubtitleWholeProgram: Bool { false }
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? { nil }
@@ -1120,6 +1123,9 @@ final class HLSLocalServer: @unchecked Sendable {
             }
         }
 
+        if normalizedPath == "/audio_names.json", let provider, let data = Self.renditionNamesData(provider: provider) {
+            return send200(fd: fd, path: normalizedPath, data: data, contentType: "application/json")
+        }
         if let renditions = provider?.nativeAudioRenditions {
             if normalizedPath.hasPrefix("/audio_"),
                normalizedPath.hasSuffix(".mp4") || normalizedPath.hasSuffix(".m4s") {
@@ -1789,6 +1795,14 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     /// Pure playlist builders callable without a live server instance. subResourceBaseURL emits absolute URIs for AVAssetResourceLoader; nil emits relative URIs for the HTTP workflow.
+    static func renditionNamesData(provider: HLSSegmentProvider) -> Data? {
+        var names = provider.nativeAudioRenditions?.localizedNames ?? [:]
+        for rendition in provider.nativeSubtitleRenditions where provider.nativeSubtitleSelectionInfo(ordinal: rendition.ordinal)?.avKitOwned == true {
+            names[rendition.name] = ["en": rendition.name]
+        }
+        return try? JSONSerialization.data(withJSONObject: names)
+    }
+
     static func buildMasterPlaylistText(provider: HLSSegmentProvider,
                                          subResourceBaseURL: URL? = nil,
                                          variant: MasterPlaylistVariant = .primary) -> String {
@@ -1839,8 +1853,12 @@ final class HLSLocalServer: @unchecked Sendable {
         if let cc = provider.masterClosedCaptions {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
-        if let renditions = provider.nativeAudioRenditions {
+        if provider.nativeAudioRenditions != nil || provider.nativeSubtitleRenditions.contains(where: {
+            provider.nativeSubtitleSelectionInfo(ordinal: $0.ordinal)?.avKitOwned == true
+        }) {
             lines.append("#EXT-X-SESSION-DATA:DATA-ID=\"_hls.localized-rendition-names\",URI=\"audio_names.json\"")
+        }
+        if let renditions = provider.nativeAudioRenditions {
             lines.append(contentsOf: renditions.mediaTags)
         } else if let audio = audioRendition {
             var audioAttrs = ["TYPE=AUDIO", "GROUP-ID=\"aud\"", "NAME=\"\(audio.name)\""]
@@ -1859,21 +1877,25 @@ final class HLSLocalServer: @unchecked Sendable {
 
         // #15: native WebVTT subtitle renditions (separate from the A/V variant; in-band timed text is
         // non-conformant for HLS). Orthogonal to the video VIDEO-RANGE/CODECS attributes.
-        // Sodalite#32: DEFAULT=NO,AUTOSELECT=NO so AVKit never auto-selects a subtitle rendition in fullscreen
-        // (the on-frame overlay owns fullscreen subtitles). The host explicitly selects the matching rendition
-        // only on PiP entry and deselects it on PiP exit, so the two never double up.
+        // Legacy overlay consumers opt out of automatic selection. AVKit-owned sessions publish
+        // source metadata and permit system language/accessibility preferences to resolve a rendition.
         let subRenditions = provider.nativeSubtitleRenditions
         for r in subRenditions {
             var mediaAttrs = ["TYPE=SUBTITLES", "GROUP-ID=\"subs\"", "NAME=\"\(r.name)\""]
             if let lang = r.language { mediaAttrs.append("LANGUAGE=\"\(lang)\"") }
-            mediaAttrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=NO"])
-            // Deliberately NO FORCED=YES, even for a source-forced track: AVKit force-displays a FORCED
-            // rendition whose language matches the selected audio regardless of DEFAULT/AUTOSELECT and the
-            // user's CC-off preference, which self-engages a rendition and contradicts the invariant above
-            // (the on-frame overlay owns fullscreen subtitles; the host selects a rendition only on PiP).
-            // A source-forced German track on German audio then rendered with subtitles off (Sodalite#38
-            // follow-on, DV-master path). Same-language forced/full pairs are disambiguated by NAME, not
-            // FORCED. `r.isForced` still rides the published track list so the host can label/pick it.
+            let selectionInfo = provider.nativeSubtitleSelectionInfo(ordinal: r.ordinal)
+            mediaAttrs.append(contentsOf: ["DEFAULT=NO", "AUTOSELECT=\((selectionInfo?.avKitOwned == true) ? "YES" : "NO")"])
+            if (selectionInfo?.avKitOwned == true) {
+                mediaAttrs.append("FORCED=\(r.isForced ? "YES" : "NO")")
+                var characteristics = selectionInfo?.selectionID.map { [$0] } ?? []
+                if selectionInfo?.isHearingImpaired == true {
+                    characteristics += ["public.accessibility.transcribes-spoken-dialog", "public.accessibility.describes-music-and-sound"]
+                }
+                if !characteristics.isEmpty {
+                    mediaAttrs.append("CHARACTERISTICS=\"\(characteristics.joined(separator: ","))\"")
+                }
+            }
+            // Legacy consumers omit FORCED so AVKit cannot bypass their overlay ownership.
             mediaAttrs.append("URI=\"subs_\(r.ordinal).m3u8\"")
             lines.append("#EXT-X-MEDIA:\(mediaAttrs.joined(separator: ","))")
         }

@@ -153,7 +153,7 @@ extension AetherEngine {
     /// A no-op when the list is empty, no track matches, or the host already activated a subtitle. The resolved
     /// index is published via `activeSubtitleTrackIndex`. Independent of `prepareNativeSubtitles`. (#73)
     func applyPreferredSubtitleSelection(startAnchor: Double?, sourceDuration: Double?) {
-        guard !loadedOptions.preferredSubtitleLanguages.isEmpty, !isSubtitleActive,
+        guard !loadedOptions.nativeSubtitleSelectionByAVKit, !loadedOptions.preferredSubtitleLanguages.isEmpty, !isSubtitleActive,
               !hostExplicitSubtitleAction else { return }
         guard let index = Self.selectSubtitleIndex(
             tracks: subtitleTracks,
@@ -2138,6 +2138,12 @@ extension AetherEngine {
     /// nil stops subtitle work and deselects. Hosts render only AVPlayer's legible output.
     /// The rendition table owns source identity; language and menu position are never source ids.
     public func selectNativeSubtitle(track ordinal: Int?) {
+        if loadedOptions.nativeSubtitleSelectionByAVKit {
+            if let ordinal, !nativeSubtitleTrackTable.indices.contains(ordinal) { return }
+            let source = ordinal.flatMap { nativeSubtitleTrackTable[$0].sourceStreamIndex ?? nativeSubtitleTrackTable[$0].externalID }
+            setNativeSubtitlePolicy(source.map { .track($0) } ?? .off)
+            return
+        }
         guard let ordinal else {
             clearSubtitle()
             setNativeSubtitleSelected(track: nil)
@@ -2154,6 +2160,10 @@ extension AetherEngine {
     /// Select or deselect a prepared native rendition by ordinal. This low-level call does not
     /// activate its source decoder; hosts selecting bitmap tracks should use selectNativeSubtitle.
     public func setNativeSubtitleSelected(track ordinal: Int?) {
+        if loadedOptions.nativeSubtitleSelectionByAVKit {
+            // Legacy reload callbacks must not turn an automatic resolution into a manual choice.
+            return
+        }
         nativeSubtitleSelectionTask?.cancel()
         nativeSubtitleSelectionTask = nil
         pendingNativeSubtitleOCROrdinal = nil
@@ -2360,7 +2370,7 @@ extension AetherEngine {
                                      externalID: track.isExternal ? track.id : nil,
                                      language: track.language,
                                      isForced: track.isForced,
-                                     needsOCR: true)
+                                     isHearingImpaired: track.isHearingImpaired, needsOCR: true)
         }
     }
 
@@ -2370,18 +2380,31 @@ extension AetherEngine {
     /// selecting the English option through the old positional fallback). Same-language duplicates
     /// get a numbered suffix; the forced disposition is carried for FORCED=YES.
     nonisolated static func nativeSubtitleRenditionInfos(
-        for entries: [NativeSubtitleTrackEntry]
+        for entries: [NativeSubtitleTrackEntry], avKitOwned: Bool = false
     ) -> [NativeSubtitleRenditionInfo] {
         var counts: [String: Int] = [:]
         return entries.enumerated().map { i, entry in
-            let base = entry.language.flatMap { Locale.current.localizedString(forIdentifier: $0) }
+            let language = entry.language.flatMap { tag -> String? in
+                guard !tag.isEmpty, tag.lowercased() != "und", tag.utf8.count <= 35,
+                      tag.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }) else { return nil }
+                return tag
+            }
+            var base = language.flatMap { Locale.current.localizedString(forIdentifier: $0) }
                 ?? "Subtitle \(i + 1)"
+            if avKitOwned {
+                if entry.isForced { base += " · Forced" }
+                if entry.isHearingImpaired { base += " · SDH" }
+                if entry.needsOCR { base += " · OCR" }
+            }
+            base = base.replacingOccurrences(of: "\"", with: "'")
             let n = (counts[base] ?? 0) + 1
             counts[base] = n
             return NativeSubtitleRenditionInfo(
-                language: entry.language,
+                language: avKitOwned ? language : entry.language,
                 name: n == 1 ? base : "\(base) \(n)",
-                isForced: entry.isForced
+                isForced: entry.isForced, avKitOwned: avKitOwned,
+                selectionID: avKitOwned ? (entry.sourceStreamIndex ?? entry.externalID).map(NativeSubtitlePolicy.characteristic) : nil,
+                isHearingImpaired: entry.isHearingImpaired
             )
         }
     }
@@ -2487,6 +2510,7 @@ extension AetherEngine {
     /// the #65 recovery does (a latched mid-reload `setNativeSubtitleRendering` is newer intent
     /// and wins over the snapshot).
     func restoreSubtitleSelection(from carryover: SubtitleSessionCarryover, resumeAnchor: Double?) {
+        guard !loadedOptions.nativeSubtitleSelectionByAVKit else { return }
         // Anchor mirrors applyPreferredSubtitleSelection: the reload's resume position (clamped
         // when the duration is already known) so the drainer/prefetcher arm at the playhead, else
         // the live sourceTime.
@@ -2558,6 +2582,10 @@ extension AetherEngine {
     /// foreign selection, bounded only against a selection fight it cannot win.
     func forceNativeLegibleDeselectedUntilHostSelects() {
         cancelNativeLegibleDeselectPin()
+        if loadedOptions.nativeSubtitleSelectionByAVKit {
+            installAVKitSubtitleSelection()
+            return
+        }
         guard nativeSubtitleReapplyOrdinal == nil, let item = currentAVPlayer?.currentItem else { return }
         currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = false
         nativeLegibleDeselectPinTask = Task { @MainActor [weak self] in
@@ -2632,6 +2660,7 @@ extension AetherEngine {
     func cancelNativeLegibleDeselectPin() {
         nativeLegibleDeselectPinTask?.cancel()
         nativeLegibleDeselectPinTask = nil
+        avKitSubtitlePendingPolicy = nil
         if let observer = nativeLegibleDeselectPinObserver {
             NotificationCenter.default.removeObserver(observer)
             nativeLegibleDeselectPinObserver = nil

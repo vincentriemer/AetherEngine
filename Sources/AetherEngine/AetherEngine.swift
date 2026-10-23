@@ -2287,6 +2287,9 @@ public final class AetherEngine: ObservableObject {
     /// which is the same defect `matchContentEnabled` had before the replay existed.
     func setLoadedTeletextPage(_ page: Int?) { loadedOptions.teletextPage = page }
 
+    /// Item replacement replays session intent, never the last automatically resolved rendition.
+    func recordNativeSubtitlePolicy(_ policy: NativeSubtitlePolicy) { loadedOptions.nativeSubtitlePolicy = policy }
+
     /// AE#464: the third narrow write into `loadedOptions`, same reason as the teletext page. The
     /// value has to live where the session's own rebuilds replay it from, or a lip-sync correction
     /// would be lost at the next audio-track switch or background return.
@@ -2399,6 +2402,7 @@ public final class AetherEngine: ObservableObject {
         /// Container FORCED disposition; declared as FORCED=YES on the WebVTT rendition so
         /// AVFoundation distinguishes same-language forced/full pairs.
         var isForced: Bool = false
+        var isHearingImpaired = false
         /// Phase D: bitmap (PGS/DVB/DVD) entry whose store is filled by the OCR worker /
         /// sidecar OCR fill, not by the pump tap or the side readers.
         var needsOCR: Bool = false
@@ -2429,6 +2433,7 @@ public final class AetherEngine: ObservableObject {
     /// The #93 stage-2 recovery reload swaps AVPlayerItems and legible selection is per-item,
     /// so the reload re-applies this to keep an active rendition (PiP) rendering. Cleared with
     /// the track table on load/stop so a new session never inherits a stale selection.
+    var avKitSubtitlePendingPolicy: NativeSubtitlePolicy?
     var nativeSubtitleReapplyOrdinal: Int?
 
     /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).
@@ -4301,6 +4306,7 @@ public final class AetherEngine: ObservableObject {
         nativeSubtitleReanchorTask = nil
         setPendingRecoverySeekTarget(nil)
         nativeSubtitleTrackTable = []
+        cancelNativeLegibleDeselectPin()
         nativeSubtitleReapplyOrdinal = nil
         nativeSubtitleSelectionTask?.cancel()
         nativeSubtitleSelectionTask = nil
@@ -6772,7 +6778,13 @@ public final class AetherEngine: ObservableObject {
     /// Item currently loaded into `currentAVPlayer` (#260). Published separately because items are swapped in
     /// place (`replaceCurrentItem`, on every audio-track reload and episode autoplay) without the player itself
     /// changing, so a host holding the item or its timebase gets no signal from `currentAVPlayer` alone.
-    @Published public internal(set) var currentAVPlayerItem: AVPlayerItem?
+    @Published public internal(set) var currentAVPlayerItem: AVPlayerItem? {
+        didSet {
+            if loadedOptions.nativeSubtitleSelectionByAVKit, currentAVPlayerItem !== oldValue {
+                installAVKitSubtitleSelection()
+            }
+        }
+    }
     private var currentItemObservation: NSKeyValueObservation?
 
     private func observeCurrentItem() {
@@ -6783,9 +6795,12 @@ public final class AetherEngine: ObservableObject {
             return
         }
         currentAVPlayerItem = player.currentItem
-        currentItemObservation = player.observe(\.currentItem, options: [.new]) { [weak self] _, change in
+        currentItemObservation = player.observe(\.currentItem, options: [.new]) { [weak self, weak player] _, change in
             guard let item = change.newValue else { return }
-            Task { @MainActor in self?.currentAVPlayerItem = item }
+            Task { @MainActor [weak self, weak player] in
+                guard let self, let player, self.currentAVPlayer === player, player.currentItem === item else { return }
+                self.currentAVPlayerItem = item
+            }
         }
     }
 
@@ -7918,6 +7933,7 @@ public final class AetherEngine: ObservableObject {
         sidecarASSHeader = nil
         isLoadingSubtitles = false
         nativeSubtitleTrackTable = []
+        cancelNativeLegibleDeselectPin()
         nativeSubtitleReapplyOrdinal = nil
         nativeSubtitleSelectionTask?.cancel()
         nativeSubtitleSelectionTask = nil

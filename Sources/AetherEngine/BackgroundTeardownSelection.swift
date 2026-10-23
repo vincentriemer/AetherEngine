@@ -39,7 +39,7 @@ extension AetherEngine {
         BackgroundTeardownSelection(
             subtitles: Self.mergedSubtitleCarryover(
                 live: captureSubtitleSessionCarryover(), snapshot: parked?.subtitles),
-            audioTrackIndex: activeAudioTrackIndex ?? parked?.audioTrackIndex,
+            audioTrackIndex: nativeVideoSession?.nativeAudioRenditions?.selectedIndex ?? activeAudioTrackIndex ?? parked?.audioTrackIndex,
             discTitleID: activeDiscTitleID ?? parked?.discTitleID
         )
     }

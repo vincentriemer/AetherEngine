@@ -171,7 +171,7 @@ struct NativeAudioRenditionsTests {
             #expect(group.options.map(\.displayName) == ["English · AAC 2.0", "English · AC-3 5.1 · Commentary", "German · AAC 2.0"])
             try await waitFor { item.status != .unknown }
             #expect(item.status == .readyToPlay, "\(String(describing: item.error))")
-            #expect(await player.seek(to: CMTime(seconds: 6, preferredTimescale: 600)))
+            #expect(await player.seek(to: CMTime(seconds: 6, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero))
             for index in [2, 3, 1] {
                 let option = try #require(group.options.first { $0.hasMediaCharacteristic(AVMediaCharacteristic(rawValue: NativeAudioRenditions.characteristic(index))) })
                 session.nativeAudioRenditions?.select(index, at: player.currentTime().seconds)
@@ -184,7 +184,7 @@ struct NativeAudioRenditionsTests {
                 player.play()
                 try await waitFor { session.activeAudioSourceStreamIndex == Int32(index) && player.currentTime().seconds > 6.15 }
                 player.pause()
-                #expect(await player.seek(to: CMTime(seconds: 6, preferredTimescale: 600)))
+                #expect(await player.seek(to: CMTime(seconds: 6, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero))
             }
         }
     }

@@ -4,6 +4,10 @@ import Foundation
 
 private final class MasterMockProvider: HLSSegmentProvider, @unchecked Sendable {
     let renditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)]
+    var selectionInfos: [NativeSubtitleRenditionInfo] = []
+    func nativeSubtitleSelectionInfo(ordinal: Int) -> NativeSubtitleRenditionInfo? {
+        selectionInfos.indices.contains(ordinal) ? selectionInfos[ordinal] : nil
+    }
     init(renditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)]) { self.renditions = renditions }
     func initSegment() -> Data? { Data([0x00]) }
     func mediaSegment(at index: Int) -> Data? { Data([0x00]) }
@@ -143,6 +147,23 @@ struct SubtitleRenditionPlaylistTests {
         #expect(m.contains("NAME=\"Deutsch\",LANGUAGE=\"ger\",DEFAULT=NO,AUTOSELECT=NO,URI=\"subs_0.m3u8\""))
         #expect(m.contains("NAME=\"Deutsch 2\",LANGUAGE=\"ger\",DEFAULT=NO,AUTOSELECT=NO,URI=\"subs_1.m3u8\""))
         #expect(!m.contains("FORCED"))
+    }
+
+    @Test("AVKit-owned subtitles publish forced/accessibility metadata and source labels")
+    func avKitOwnedMaster() throws {
+        let provider = MasterMockProvider(renditions: [(0, "en", "English Forced", true), (1, nil, "Unknown OCR", false)])
+        provider.selectionInfos = [
+            .init(language: "en", name: "English Forced", isForced: true, avKitOwned: true, selectionID: "com.aetherengine.subtitle.source.31"),
+            .init(language: nil, name: "Unknown OCR", isForced: false, avKitOwned: true, selectionID: "com.aetherengine.subtitle.source.99", isHearingImpaired: true),
+        ]
+        let master = HLSLocalServer.buildMasterPlaylistText(provider: provider)
+        #expect(master.contains("DEFAULT=NO,AUTOSELECT=YES,FORCED=YES"))
+        #expect(master.contains("public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"))
+        #expect(master.contains("com.aetherengine.subtitle.source.31"))
+        #expect(master.contains("_hls.localized-rendition-names"))
+        let data = try #require(HLSLocalServer.renditionNamesData(provider: provider))
+        let names = try #require(JSONSerialization.jsonObject(with: data) as? [String: [String: String]])
+        #expect(names["Unknown OCR"]?["en"] == "Unknown OCR")
     }
 
     @Test("master omits SUBTITLES when no native subs")

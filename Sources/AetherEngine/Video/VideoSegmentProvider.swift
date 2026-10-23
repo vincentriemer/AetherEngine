@@ -10,6 +10,9 @@ struct NativeSubtitleRenditionInfo: Sendable, Equatable {
     let language: String?
     let name: String
     let isForced: Bool
+    var avKitOwned = false
+    var selectionID: String? = nil
+    var isHearingImpaired = false
 }
 
 // MARK: - Live window sizing
@@ -3069,6 +3072,10 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     static let atmosChannelsAttribute = "16/JOC"
 
     // MARK: - Native subtitle renditions (#15)
+
+    func nativeSubtitleSelectionInfo(ordinal: Int) -> NativeSubtitleRenditionInfo? {
+        nativeSubRenditionInfos.indices.contains(ordinal) ? nativeSubRenditionInfos[ordinal] : nil
+    }
 
     var nativeSubtitleRenditions: [(ordinal: Int, language: String?, name: String, isForced: Bool)] {
         guard !nativeSubStores.isEmpty else { return [] }

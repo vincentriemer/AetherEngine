@@ -75,7 +75,7 @@ struct NativeBitmapSubtitleSelectionTests {
         engine.nativeSubtitleReaderParams = (url, stores)
         engine.selectNativeSubtitle(track: 0)
         let textReader = try #require(engine.nativeSubtitleReadersTask)
-        for _ in 0..<100 where stores[0].cueCount == 0 {
+        for _ in 0..<100 where stores[0].cueCount < 2 {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(stores[0].cueCount == 2)
@@ -87,7 +87,7 @@ struct NativeBitmapSubtitleSelectionTests {
         #expect(engine.nativeSubtitleReaderDeferralTask == nil)
         #expect(engine.subtitleOCRArmedOrdinal == 2)
         engine.selectNativeSubtitle(track: 1)
-        for _ in 0..<100 where stores[1].cueCount == 0 {
+        for _ in 0..<100 where stores[1].cueCount < 2 {
             try await Task.sleep(for: .milliseconds(20))
         }
         #expect(stores[1].cueCount == 2)

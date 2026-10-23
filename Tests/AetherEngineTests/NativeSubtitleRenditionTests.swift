@@ -58,6 +58,25 @@ struct NativeSubtitleRenditionTests {
         #expect(AetherEngine.nativeOptionIndex(forLanguage: nil, rank: 0, optionLanguageTags: tags) == nil)
     }
 
+    @Test("AVKit metadata preserves identities and omits unknown language")
+    func avKitMetadata() {
+        let entries: [AetherEngine.NativeSubtitleTrackEntry] = [
+            .init(sourceStreamIndex: 31, language: "en", isForced: true),
+            .init(sourceStreamIndex: 9, language: "en", isHearingImpaired: true),
+            .init(sourceStreamIndex: 42, language: "und", needsOCR: true),
+            .init(sourceStreamIndex: 7, language: "invalid\"\n"),
+        ]
+        let infos = AetherEngine.nativeSubtitleRenditionInfos(for: entries, avKitOwned: true)
+        #expect(infos.allSatisfy { $0.avKitOwned })
+        #expect(infos.map(\.selectionID) == [31, 9, 42, 7].map(NativeSubtitlePolicy.characteristic))
+        #expect(infos[0].isForced && !infos[0].isHearingImpaired)
+        #expect(infos[1].isHearingImpaired && !infos[1].isForced)
+        #expect(infos[2].language == nil && infos[3].language == nil)
+        #expect(Set(infos.map(\.name)).count == entries.count)
+        let legacy = AetherEngine.nativeSubtitleRenditionInfos(for: entries)
+        #expect(legacy.allSatisfy { !$0.avKitOwned && $0.selectionID == nil })
+    }
+
     // MARK: - Phase D: bitmap OCR renditions
 
     @Test("bitmap tracks become needsOCR entries; text tracks and live sessions are excluded")

@@ -412,6 +412,11 @@ public enum DolbyVisionHandling: String, Sendable, Equatable, CaseIterable {
 }
 
 public struct LoadOptions: Sendable, Equatable {
+    /// Let AVKit own legible selection and system caption preferences. Default preserves overlay hosts.
+    public var nativeSubtitleSelectionByAVKit = false
+    /// Session intent, independent of the automatically resolved rendition.
+    public var nativeSubtitlePolicy: NativeSubtitlePolicy = .automatic
+
     /// Container-indexed source names for native HLS audio renditions. Empty keeps legacy muxed audio.
     /// Only validated container audio streams are published; names describe source formats.
     public var nativeAudioTrackNames: [Int: String] = [:]
