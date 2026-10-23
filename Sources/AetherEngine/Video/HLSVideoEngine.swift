@@ -307,6 +307,10 @@ public final class HLSVideoEngine: @unchecked Sendable {
     /// Serve the SUBTITLES rendition as one whole-program .vtt (Sodalite#32). Set before `start()`.
     var nativeSubtitleWholeProgram: Bool = false
 
+    /// Installed before the native item attaches. A segment request can precede AVFoundation's
+    /// media-selection discovery, so the requested source must be allowed to warm up then.
+    var nativeSubtitleDemandHandler: (@Sendable (Int) -> Void)?
+
     /// Source position (seconds) the playback stream started at (resume/seek). Device-confirmed AVKit anchors a
     /// whole-program VOD .vtt's time 0 to the stream start, so whole-program cues shift by this so cue-for-source-S
     /// lands at currentTime S (from-start = 0 = no shift). Set before `start()`. Sodalite#32.
@@ -2257,6 +2261,7 @@ public final class HLSVideoEngine: @unchecked Sendable {
             stripASSMarkupInVTT: preserveASSMarkupForSubtitleTap,
             nativeSubtitleDefaultOrdinal: nativeSubtitleDefaultOrdinal,
             nativeSubtitleWholeProgram: nativeSubtitleWholeProgram,
+            nativeSubtitleDemand: { [weak self] ordinal in self?.nativeSubtitleDemandHandler?(ordinal) },
             currentShiftSeconds: { [weak self] in (self?.playlistShiftSeconds ?? 0) + (self?.subtitleStreamStartSeconds ?? 0) },
             segmentPlacedHandler: segmentPlacedHandler,
             segmentServedHandler: segmentServedHandler

@@ -808,6 +808,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     private let nativeSubRenditionInfos: [NativeSubtitleRenditionInfo]
     /// Ordinal advertised as DEFAULT=YES in the master SUBTITLES group (Sodalite#32).
     let nativeSubtitleDefaultOrdinal: Int
+    private let nativeSubtitleDemand: (@Sendable (Int) -> Void)?
     /// Serve the SUBTITLES rendition as ONE whole-program .vtt (single VOD segment spanning the full duration)
     /// instead of one .vtt per video segment. The only AVPlayer-reliable sideload shape (Sodalite#32); requires
     /// eager readers (all cues available up front) and a bounded program (VOD).
@@ -1056,6 +1057,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         stripASSMarkupInVTT: Bool = false,
         nativeSubtitleDefaultOrdinal: Int = 0,
         nativeSubtitleWholeProgram: Bool = false,
+        nativeSubtitleDemand: (@Sendable (Int) -> Void)? = nil,
         currentShiftSeconds: @escaping @Sendable () -> Double = { 0 },
         segmentPlacedHandler: (@Sendable (Int) -> Void)? = nil,
         segmentServedHandler: (@Sendable (Int, Bool) -> Void)? = nil
@@ -1107,6 +1109,7 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
         self.stripASSMarkupInVTT = stripASSMarkupInVTT
         self.nativeSubtitleDefaultOrdinal = nativeSubtitleDefaultOrdinal
         self.nativeSubtitleWholeProgram = nativeSubtitleWholeProgram
+        self.nativeSubtitleDemand = nativeSubtitleDemand
         self.currentShiftSeconds = currentShiftSeconds
         self.segmentPlacedHandler = segmentPlacedHandler
         self.segmentServedHandler = segmentServedHandler
@@ -3100,6 +3103,9 @@ final class VideoSegmentProvider: HLSSegmentProvider, @unchecked Sendable {
     func nativeSubtitleVTT(ordinal: Int, segmentIndex: Int) -> String? {
         guard ordinal >= 0, ordinal < nativeSubStores.count else { return nil }
         let store = nativeSubStores[ordinal]
+        // Do not wait for item.readyToPlay to arm this source: readiness may itself be waiting
+        // for these first subtitle bytes. Playlist/option discovery alone opens no workers.
+        nativeSubtitleDemand?(ordinal)
         if nativeSubtitleWholeProgram {
             // Sodalite#32: serve the ENTIRE program's cues as one .vtt (the only AVPlayer-reliable sideload
             // shape). AVKit fetches this VOD single-segment file ONCE and never re-fetches it, so it MUST be

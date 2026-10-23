@@ -31,7 +31,105 @@ struct AVKitSubtitleSelectionTests {
         #expect(engine.subtitleDrainTargets.isEmpty)
     }
 
+    @Test func demandHonorsPolicyAndRejectsRetiredSessions() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        var options = LoadOptions()
+        options.nativeSubtitleSelectionByAVKit = true
+        engine.setLoadedOptionsForTesting(options)
+        engine.loadedURL = URL(fileURLWithPath: "/synthetic.mkv")
+        engine.nativeSubtitleTrackTable = [
+            .init(sourceStreamIndex: 41, language: "en", needsOCR: true),
+            .init(sourceStreamIndex: 77, language: "ja", needsOCR: true),
+        ]
+        engine.testHookNativeStores = [NativeSubtitleCueStore(), NativeSubtitleCueStore()]
+        let session = HLSVideoEngine(url: URL(fileURLWithPath: "/synthetic.mkv"), dvModeAvailable: false)
+        engine.nativeVideoSession = session
+        engine.currentAVPlayer = AVPlayer(playerItem: AVPlayerItem(asset: AVMutableComposition()))
+        let demand = try #require(session.nativeSubtitleDemandHandler)
+        demand(0)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(engine.activeSubtitleTrackIndex == 41)
+        let worker = try #require(engine.subtitleOCRWorkerTask)
+        demand(1) // An unresolved prefetch cannot open every source or undo a newer choice.
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(engine.activeSubtitleTrackIndex == 41)
+        #expect(!worker.isCancelled)
+        engine.setNativeSubtitlePolicy(.off)
+        #expect(worker.isCancelled)
+        demand(0)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(engine.activeSubtitleTrackIndex == nil)
+        #expect(engine.subtitleOCRWorkerTask == nil)
+        engine.setNativeSubtitlePolicy(.track(77))
+        demand(0)
+        demand(1)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(engine.activeSubtitleTrackIndex == 77)
+        #expect(engine.nativeSubtitleSelectionPolicy == .track(77))
+        engine.activateAVKitSubtitleSource(nil)
+        let replacement = HLSVideoEngine(url: URL(fileURLWithPath: "/replacement.mkv"), dvModeAvailable: false)
+        engine.nativeVideoSession = replacement
+        demand(1)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(engine.activeSubtitleTrackIndex == nil)
+        let replacementDemand = try #require(replacement.nativeSubtitleDemandHandler)
+        engine.stop()
+        replacementDemand(1)
+        try await Task.sleep(for: .milliseconds(20))
+        #expect(engine.activeSubtitleTrackIndex == nil)
+        #expect(engine.subtitleOCRWorkerTask == nil)
+        #expect(engine.nativeSubtitleReadersTask == nil)
+    }
+
     #if os(macOS)
+        @Test(.timeLimit(.minutes(1))) func automaticEmptyRenditionStartsItsSourceBeforeReadiness() async throws {
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let engine = try AetherEngine()
+            defer { engine.stop() }
+            var options = LoadOptions()
+            options.nativeSubtitleSelectionByAVKit = true
+            engine.setLoadedOptionsForTesting(options)
+            engine.loadedURL = URL(fileURLWithPath: "/synthetic.mkv")
+            engine.nativeSubtitleTrackTable = [.init(sourceStreamIndex: 41, language: "en", needsOCR: true)]
+            let store = NativeSubtitleCueStore()
+            engine.testHookNativeStores = [store]
+            let session = HLSVideoEngine(url: root.appendingPathComponent("Fixtures/native-audio-tracks.mkv"), dvModeAvailable: false)
+            session.enableNativeSubtitleTrackForSession = true
+            session.nativeSubtitleRenditionInfosForSession = AetherEngine.nativeSubtitleRenditionInfos(for: engine.nativeSubtitleTrackTable, avKitOwned: true)
+            session.nativeSubtitleLanguagesForSession = ["en"]
+            session.nativeSubtitleCueStoresForSession = [store]
+            engine.nativeVideoSession = session
+            let url = try await BlockingWork.detached { try session.start() }.value
+            defer { session.stop() }
+            let item = AVPlayerItem(url: url)
+            let player = AVPlayer()
+            player.setMediaSelectionCriteria(.init(preferredLanguages: ["en"], preferredMediaCharacteristics: nil), forMediaCharacteristic: .legible)
+            engine.currentAVPlayer = player
+            player.replaceCurrentItem(with: item)
+            player.play()
+            // Simulate a cold OCR source: it can only publish after the selected worker is armed.
+            let output = AVPlayerItemLegibleOutput()
+            let sink = SubtitleOutputSink()
+            output.setDelegate(sink, queue: .main)
+            item.add(output)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while engine.subtitleOCRArmedOrdinal == nil, ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(engine.subtitleOCRArmedOrdinal == 0, "The selected source must start before AVPlayer waits for its empty rendition")
+            guard engine.subtitleOCRArmedOrdinal == 0 else { return }
+            store.appendCues([.init(id: 0, startTime: 0, endTime: 20, body: .text("Cold automatic OCR cue"))])
+            store.markFinished()
+            let rendered = ContinuousClock.now.advanced(by: .seconds(5))
+            while !sink.texts.withLock({ $0.contains(where: { $0.contains("Cold automatic OCR cue") }) }), ContinuousClock.now < rendered {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(item.status == .readyToPlay)
+            #expect(sink.texts.withLock { $0.contains(where: { $0.contains("Cold automatic OCR cue") }) })
+            #expect(engine.nativeSubtitleSelectionPolicy == .automatic)
+        }
+
         @Test(.timeLimit(.minutes(2))) func engineSelectionReloadAndStaleItem() async throws {
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let subtitles = FileManager.default.temporaryDirectory.appendingPathComponent("native-policy-\(UUID()).srt")

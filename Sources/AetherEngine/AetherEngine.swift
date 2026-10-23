@@ -1849,6 +1849,7 @@ public final class AetherEngine: ObservableObject {
                 residentRanges = []
                 return
             }
+            installAVKitSubtitleDemand(on: session)
             session.setResidentRangesObserver { [weak self, weak session] ranges in
                 Task { @MainActor in
                     guard let self, let session, self.nativeVideoSession === session else { return }
