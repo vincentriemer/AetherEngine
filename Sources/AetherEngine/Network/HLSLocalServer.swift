@@ -1123,9 +1123,6 @@ final class HLSLocalServer: @unchecked Sendable {
             }
         }
 
-        if normalizedPath == "/audio_names.json", let provider, let data = Self.renditionNamesData(provider: provider) {
-            return send200(fd: fd, path: normalizedPath, data: data, contentType: "application/json")
-        }
         if let renditions = provider?.nativeAudioRenditions {
             if normalizedPath.hasPrefix("/audio_"),
                normalizedPath.hasSuffix(".mp4") || normalizedPath.hasSuffix(".m4s") {
@@ -1795,14 +1792,6 @@ final class HLSLocalServer: @unchecked Sendable {
     }
 
     /// Pure playlist builders callable without a live server instance. subResourceBaseURL emits absolute URIs for AVAssetResourceLoader; nil emits relative URIs for the HTTP workflow.
-    static func renditionNamesData(provider: HLSSegmentProvider) -> Data? {
-        var names = provider.nativeAudioRenditions?.localizedNames ?? [:]
-        for rendition in provider.nativeSubtitleRenditions where provider.nativeSubtitleSelectionInfo(ordinal: rendition.ordinal)?.avKitOwned == true {
-            names[rendition.name] = ["en": rendition.name]
-        }
-        return try? JSONSerialization.data(withJSONObject: names)
-    }
-
     static func buildMasterPlaylistText(provider: HLSSegmentProvider,
                                          subResourceBaseURL: URL? = nil,
                                          variant: MasterPlaylistVariant = .primary) -> String {
@@ -1853,12 +1842,8 @@ final class HLSLocalServer: @unchecked Sendable {
         if let cc = provider.masterClosedCaptions {
             streamInfAttrs.append("CLOSED-CAPTIONS=\(cc)")
         }
-        if provider.nativeAudioRenditions != nil || provider.nativeSubtitleRenditions.contains(where: {
-            provider.nativeSubtitleSelectionInfo(ordinal: $0.ordinal)?.avKitOwned == true
-        }) {
-            lines.append("#EXT-X-SESSION-DATA:DATA-ID=\"_hls.localized-rendition-names\",URI=\"audio_names.json\"")
-        }
         if let renditions = provider.nativeAudioRenditions {
+            lines.append("#EXT-X-SESSION-DATA:DATA-ID=\"_hls.localized-rendition-names\",URI=\"audio_names.json\"")
             lines.append(contentsOf: renditions.mediaTags)
         } else if let audio = audioRendition {
             var audioAttrs = ["TYPE=AUDIO", "GROUP-ID=\"aud\"", "NAME=\"\(audio.name)\""]

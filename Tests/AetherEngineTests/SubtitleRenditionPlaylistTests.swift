@@ -160,10 +160,8 @@ struct SubtitleRenditionPlaylistTests {
         #expect(master.contains("DEFAULT=NO,AUTOSELECT=YES,FORCED=YES"))
         #expect(master.contains("public.accessibility.transcribes-spoken-dialog,public.accessibility.describes-music-and-sound"))
         #expect(master.contains("com.aetherengine.subtitle.source.31"))
-        #expect(master.contains("_hls.localized-rendition-names"))
-        let data = try #require(HLSLocalServer.renditionNamesData(provider: provider))
-        let names = try #require(JSONSerialization.jsonObject(with: data) as? [String: [String: String]])
-        #expect(names["Unknown OCR"]?["en"] == "Unknown OCR")
+        #expect(!master.contains("_hls.localized-rendition-names"))
+        #expect(master.contains("NAME=\"Unknown OCR\",DEFAULT=NO,AUTOSELECT=YES"))
     }
 
     @Test("master omits SUBTITLES when no native subs")

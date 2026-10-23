@@ -174,7 +174,7 @@ struct AVKitSubtitleSelectionTests {
             item.add(output)
             let group = try #require(try await item.asset.loadMediaSelectionGroup(for: .legible))
             #expect(group.options.count == entries.count)
-            #expect(Set(group.options.map(\.displayName)).count == entries.count)
+            #expect(Set(session.nativeSubtitleRenditionInfosForSession.map(\.name)).count == entries.count)
             for entry in entries {
                 let id = try NativeSubtitlePolicy.characteristic(#require(entry.sourceStreamIndex))
                 let matches = group.options.filter { $0.hasMediaCharacteristic(.init(rawValue: id)) }

@@ -65,10 +65,6 @@ final class NativeAudioRenditions: @unchecked Sendable {
         self.failed = failed
     }
 
-    var localizedNames: [String: [String: String]] {
-        Dictionary(uniqueKeysWithValues: tracks.map { ($0.name, ["en": $0.name]) })
-    }
-
     var codecs: [String] {
         Array(Set(tracks.flatMap(\.codecs))).sorted()
     }
@@ -137,7 +133,8 @@ final class NativeAudioRenditions: @unchecked Sendable {
 
     func response(path: String) -> Response? {
         if path == "/audio_names.json" {
-            return (try? JSONSerialization.data(withJSONObject: localizedNames)).map { Response(data: $0, type: "application/json") }
+            let names = Dictionary(uniqueKeysWithValues: tracks.map { ($0.name, ["en": $0.name]) })
+            return (try? JSONSerialization.data(withJSONObject: names)).map { Response(data: $0, type: "application/json") }
         }
         let parts = path.split(separator: "/")
         guard parts.count == 2, parts[0].hasPrefix("audio_"),
