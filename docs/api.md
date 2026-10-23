@@ -1398,3 +1398,11 @@ pipeline must finish before a replacement starts. `LoadOptions.nativeAudioLossle
 keeps recovered tracks on their lossless bed through a rebuild. The host owns recovery limits.
 Custom sources must support `IOReader.makeIndependentReader()`; live/forward-only sources do not
 support this option. Physical Apple TV acceptance remains separate from synthetic tests.
+
+### Native subtitle selection policy (fork extension)
+
+With `LoadOptions.prepareNativeSubtitles`, hosts can opt into `LoadOptions.nativeSubtitleSelectionByAVKit`. The default remains false for existing overlay/PiP consumers. `LoadOptions.nativeSubtitlePolicy` starts at `NativeSubtitlePolicy.automatic`; `.off` and `.track(sourceID)` record explicit session choices. `setNativeSubtitlePolicy(_:)` restores that intent without forcing an automatic resolution into a manual track selection.
+
+`nativeSubtitleSelectionPolicy` reports session intent, while `nativeSubtitleResolvedOrdinal` reports the engine rendition currently selected by AVPlayer. `NativeSubtitleTrack.sourceID` is the source identity for policy; its `ordinal` is only the engine table position. Never match an AVFoundation option by language or list position in this mode: source characteristics are stable and same-language tracks can differ. Hosts may use the published distinct display names in a system transport menu when AVKit's built-in selector groups alternatives.
+
+Current-item media selection activates only the selected reader/OCR worker. Off, replacement and stop retire obsolete work. Automatic criteria retain independently selected audio. Validated language, forced and explicit hearing-impaired characteristics make supported text and OCR renditions eligible for system preference selection; unknown metadata is omitted. This does not add a subtitle overlay or reproduce AVKit-only UI behavior.

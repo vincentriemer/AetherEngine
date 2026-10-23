@@ -2385,6 +2385,7 @@ extension AetherEngine {
         var counts: [String: Int] = [:]
         return entries.enumerated().map { i, entry in
             let language = entry.language.flatMap { tag -> String? in
+                if !avKitOwned { return tag }
                 guard !tag.isEmpty, tag.lowercased() != "und", tag.utf8.count <= 35,
                       tag.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 }) else { return nil }
                 return tag
@@ -2400,7 +2401,7 @@ extension AetherEngine {
             let n = (counts[base] ?? 0) + 1
             counts[base] = n
             return NativeSubtitleRenditionInfo(
-                language: avKitOwned ? language : entry.language,
+                language: language,
                 name: n == 1 ? base : "\(base) \(n)",
                 isForced: entry.isForced, avKitOwned: avKitOwned,
                 selectionID: avKitOwned ? (entry.sourceStreamIndex ?? entry.externalID).map(NativeSubtitlePolicy.characteristic) : nil,

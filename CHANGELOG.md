@@ -1,5 +1,11 @@
 # Changelog
 
+## ATVPlayer fork - native subtitle selection
+
+- Add opt-in native subtitle ownership with automatic, explicit Off and source-ID policies; retain legacy behavior by default.
+- Publish validated language, forced and accessibility metadata and stable source identities; activate only the selected text/OCR source and cancel retired work.
+- Preserve source audio through automatic caption selection and replacement. No subtitle localized-name endpoint or extra audio-processing pipeline is added.
+
 ## Fork: bounded video fragment memory — 2026-10-21
 
 - Flush video-only muxer payloads at an 8 MiB budget into the current disk-backed segment. Preserve complete samples, timestamps, segment boundaries, and cache headroom. Mixed A/V interleaving and audio-only processing keep their existing policy.

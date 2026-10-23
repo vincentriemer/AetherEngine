@@ -75,6 +75,8 @@ struct NativeSubtitleRenditionTests {
         #expect(Set(infos.map(\.name)).count == entries.count)
         let legacy = AetherEngine.nativeSubtitleRenditionInfos(for: entries)
         #expect(legacy.allSatisfy { !$0.avKitOwned && $0.selectionID == nil })
+        #expect(legacy.map(\.language) == entries.map(\.language))
+        #expect(legacy[2].name == Locale.current.localizedString(forIdentifier: "und"))
     }
 
     // MARK: - Phase D: bitmap OCR renditions

@@ -1313,16 +1313,18 @@ extension AetherEngine {
                 let ccStore = NativeSubtitleCueStore()
                 self.ccNativeStore = ccStore
                 let ccOrdinal = session.nativeSubtitleCueStoresForSession.count
-                let ccName = ccTrack.language.map { "CC (\($0))" } ?? "Closed Captions"
+                let ccEntry = NativeSubtitleTrackEntry(sourceStreamIndex: ccTrack.id, language: ccTrack.language,
+                                                       isHearingImpaired: ccTrack.isHearingImpaired)
+                let ccInfo = Self.nativeSubtitleRenditionInfos(for: [ccEntry], avKitOwned: loadedOptions.nativeSubtitleSelectionByAVKit)[0]
+                let ccName = ccInfo.language.map { "CC (\($0))" } ?? "Closed Captions"
                 session.nativeSubtitleCueStoresForSession.append(ccStore)
-                session.nativeSubtitleLanguagesForSession.append(ccTrack.language)
+                session.nativeSubtitleLanguagesForSession.append(ccInfo.language)
                 session.nativeSubtitleRenditionInfosForSession.append(
-                    NativeSubtitleRenditionInfo(language: ccTrack.language, name: ccName, isForced: false, avKitOwned: loadedOptions.nativeSubtitleSelectionByAVKit, selectionID: NativeSubtitlePolicy.characteristic(ccTrack.id), isHearingImpaired: ccTrack.isHearingImpaired))
+                    NativeSubtitleRenditionInfo(language: ccInfo.language, name: ccName, isForced: false, avKitOwned: ccInfo.avKitOwned, selectionID: ccInfo.selectionID, isHearingImpaired: ccInfo.isHearingImpaired))
                 session.nativeSubtitleSourceStreamIndicesForSession.append(Int32(ccTrack.id))
-                nativeSubtitleTrackTable.append(
-                    NativeSubtitleTrackEntry(sourceStreamIndex: ccTrack.id, language: ccTrack.language))
+                nativeSubtitleTrackTable.append(ccEntry)
                 nativeSubtitleTracks.append(
-                    NativeSubtitleTrack(ordinal: ccOrdinal, language: ccTrack.language, displayName: ccName,
+                    NativeSubtitleTrack(ordinal: ccOrdinal, language: ccInfo.language, displayName: ccName,
                                         sourceID: ccTrack.id))
             }
             // Phase D: append the bitmap OCR renditions last. Stores stay empty until the OCR
@@ -1337,7 +1339,7 @@ extension AetherEngine {
                 session.nativeSubtitleSourceStreamIndicesForSession.append(nil)
                 nativeSubtitleTrackTable.append(entry)
                 nativeSubtitleTracks.append(NativeSubtitleTrack(
-                    ordinal: ordinal, language: entry.language, displayName: bitmapInfos[i].name,
+                    ordinal: ordinal, language: bitmapInfos[i].language, displayName: bitmapInfos[i].name,
                     sourceID: entry.sourceStreamIndex ?? entry.externalID))
             }
             // Sodalite#32: with eager readers the whole cue set is available up front, so serve the rendition as
