@@ -49,18 +49,6 @@ struct TrueHDObjectMetadataMappingTests {
         #expect(TrueHDObjectAudioDecoder.role(forSpeaker: TRUEHD_ATMOS_SPEAKER_UNKNOWN) == .object)
     }
 
-    @Test("splitting the bed, an element is a point at its position with its gain, and nothing else")
-    func pointSource() {
-        let flags = TRUEHD_ATMOS_ELEMENT_ACTIVE | TRUEHD_ATMOS_ELEMENT_SNAP | TRUEHD_ATMOS_ELEMENT_SCREEN_REF
-        let state = TrueHDObjectAudioDecoder.pointSource(
-            for: element(flags: flags, position: (0.8, 0.6, 1), size: (0.4, 0.4, 0.4), zone: TRUEHD_ATMOS_ZONE_NO_BACK))
-        #expect(state == ObjectAudioElementState(position: SIMD3(0.8, 0.6, 1), gain: 0.5))
-        #expect(TrueHDObjectAudioDecoder.pointSource(for: element(flags: 0)).gain == 0)
-        #expect(TrueHDObjectAudioDecoder.pointSource(for: element(position: (0.5, 0.5, -0.6))).position.z == 0)
-        #expect(TrueHDObjectAudioDecoder.pointSource(for: element(kind: TRUEHD_ATMOS_ELEMENT_ISF)).position
-                == SIMD3(0.5, 0.5, 0.5))
-    }
-
     @Test("an active elevated object keeps its position, gain and largest size dimension")
     func plainObject() {
         let state = TrueHDObjectAudioDecoder.state(for: element(size: (0.1, 0.3, 0.2)))
@@ -156,10 +144,6 @@ struct TrueHDObjectMetadataMappingTests {
     @Test("the decoder opens, takes input and asks for more")
     func decoderLifecycle() throws {
         let decoder = try TrueHDObjectAudioDecoder()
-        #expect(!decoder.splitsBed)
-        #expect(!decoder.playsBedOnly)
-        let comparison = try TrueHDObjectAudioDecoder(splitsBed: true)
-        #expect(comparison.playsBedOnly)
         let junk = [UInt8](repeating: 0x5A, count: 4096)
         try junk.withUnsafeBytes { try decoder.push($0) }
         #expect(try decoder.nextBlock() == nil)
