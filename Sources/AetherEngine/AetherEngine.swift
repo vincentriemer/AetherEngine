@@ -2615,6 +2615,7 @@ public final class AetherEngine: ObservableObject {
     /// so the reload re-applies this to keep an active rendition (PiP) rendering. Cleared with
     /// the track table on load/stop so a new session never inherits a stale selection.
     var avKitSubtitlePendingPolicy: NativeSubtitlePolicy?
+    var avKitSubtitleSelectionPhase: AVKitSubtitleSelectionPhase?
     var nativeSubtitleReapplyOrdinal: Int?
 
     /// Whole-file decode tasks filling native stores for load-declared external tracks (#88).

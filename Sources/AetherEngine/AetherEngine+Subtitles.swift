@@ -2732,6 +2732,7 @@ extension AetherEngine {
         nativeLegibleDeselectPinTask?.cancel()
         nativeLegibleDeselectPinTask = nil
         avKitSubtitlePendingPolicy = nil
+        avKitSubtitleSelectionPhase = nil
         if let observer = nativeLegibleDeselectPinObserver {
             NotificationCenter.default.removeObserver(observer)
             nativeLegibleDeselectPinObserver = nil

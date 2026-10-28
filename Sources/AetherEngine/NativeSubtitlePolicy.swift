@@ -10,6 +10,23 @@ public enum NativeSubtitlePolicy: Sendable, Equatable {
     }
 }
 
+/// Selection notifications include audio acknowledgements and can arrive after a newer command.
+/// Compare legible state, rather than treating every notification as a new subtitle choice.
+struct AVKitSubtitleSelectionState: Equatable {
+    let option: AVMediaSelectionOption?
+    let automatic: Bool
+
+    init(item: AVPlayerItem, group: AVMediaSelectionGroup) {
+        option = item.currentMediaSelection.selectedMediaOption(in: group)
+        automatic = item.currentMediaSelection.mediaSelectionCriteriaCanBeAppliedAutomatically(to: group)
+    }
+}
+
+enum AVKitSubtitleSelectionPhase {
+    case preparing(AVKitSubtitleSelectionState)
+    case applying(AVKitSubtitleSelectionState)
+}
+
 extension AetherEngine {
     public var nativeSubtitleResolvedOrdinal: Int? {
         nativeSubtitleReapplyOrdinal
@@ -59,12 +76,35 @@ extension AetherEngine {
 
     /// Shares the item-owned observation lifetime with the legacy deselection pin, never its behavior.
     func installAVKitSubtitleSelection() {
-        cancelNativeLegibleDeselectPin()
-        guard let item = currentAVPlayer?.currentItem else { return }
+        guard let item = currentAVPlayer?.currentItem else {
+            cancelNativeLegibleDeselectPin()
+            return
+        }
+        if nativeLegibleDeselectPinItem === item, let group = nativeLegibleDeselectPinGroup {
+            nativeLegibleDeselectPinTask?.cancel()
+            avKitSubtitleSelectionPhase = .preparing(.init(item: item, group: group))
+        } else {
+            cancelNativeLegibleDeselectPin()
+        }
+        avKitSubtitlePendingPolicy = loadedOptions.nativeSubtitlePolicy
         nativeLegibleDeselectPinTask = Task { @MainActor [weak self, weak item] in
             guard let self, let item,
                   let group = try? await item.asset.loadMediaSelectionGroup(for: .legible),
                   !Task.isCancelled, self.currentAVPlayer?.currentItem === item else { return }
+            if self.nativeLegibleDeselectPinObserver == nil {
+                self.nativeLegibleDeselectPinItem = item
+                self.nativeLegibleDeselectPinGroup = group
+                self.avKitSubtitleSelectionPhase = .preparing(.init(item: item, group: group))
+                self.nativeLegibleDeselectPinObserver = NotificationCenter.default.addObserver(
+                    forName: AVPlayerItem.mediaSelectionDidChangeNotification, object: item, queue: .main
+                ) { [weak self, weak item] _ in
+                    MainActor.assumeIsolated {
+                        guard let self, let item, item === self.currentAVPlayer?.currentItem,
+                              let group = self.nativeLegibleDeselectPinGroup else { return }
+                        self.consumeAVKitSubtitleSelection(item: item, group: group)
+                    }
+                }
+            }
             // Automatic legible selection must not release the user's source audio selection.
             if let audio = try? await item.asset.loadMediaSelectionGroup(for: .audible),
                !Task.isCancelled, self.currentAVPlayer?.currentItem === item
@@ -81,8 +121,12 @@ extension AetherEngine {
             self.currentAVPlayer?.appliesMediaSelectionCriteriaAutomatically = true
             self.avKitSubtitlePendingPolicy = self.loadedOptions.nativeSubtitlePolicy
             switch self.loadedOptions.nativeSubtitlePolicy {
-            case .automatic: item.selectMediaOptionAutomatically(in: group)
-            case .off: item.select(nil, in: group)
+            case .automatic:
+                self.avKitSubtitleSelectionPhase = .applying(.init(item: item, group: group))
+                item.selectMediaOptionAutomatically(in: group)
+            case .off:
+                self.avKitSubtitleSelectionPhase = .applying(.init(item: item, group: group))
+                item.select(nil, in: group)
             case let .track(source):
                 let option = group.options.first { $0.hasMediaCharacteristic(.init(rawValue: NativeSubtitlePolicy.characteristic(source))) }
                 if option == nil {
@@ -101,18 +145,8 @@ extension AetherEngine {
                           self.currentAVPlayer?.currentItem === item,
                           self.loadedOptions.nativeSubtitlePolicy == .track(source) else { return }
                 }
+                self.avKitSubtitleSelectionPhase = .applying(.init(item: item, group: group))
                 item.select(option, in: group)
-            }
-            self.nativeLegibleDeselectPinItem = item
-            self.nativeLegibleDeselectPinGroup = group
-            self.nativeLegibleDeselectPinObserver = NotificationCenter.default.addObserver(
-                forName: AVPlayerItem.mediaSelectionDidChangeNotification, object: item, queue: .main
-            ) { [weak self, weak item] _ in
-                MainActor.assumeIsolated {
-                    guard let self, let item, item === self.currentAVPlayer?.currentItem,
-                          let group = self.nativeLegibleDeselectPinGroup else { return }
-                    self.consumeAVKitSubtitleSelection(item: item, group: group)
-                }
             }
             self.consumeAVKitSubtitleSelection(item: item, group: group)
         }
@@ -120,22 +154,36 @@ extension AetherEngine {
 
     func consumeAVKitSubtitleSelection(item: AVPlayerItem, group: AVMediaSelectionGroup) {
         guard loadedOptions.nativeSubtitleSelectionByAVKit, currentAVPlayer?.currentItem === item else { return }
-        let selected = item.currentMediaSelection.selectedMediaOption(in: group)
-        let automatic = item.currentMediaSelection.mediaSelectionCriteriaCanBeAppliedAutomatically(to: group)
+        let state = AVKitSubtitleSelectionState(item: item, group: group)
+        let selected = state.option
+        let automatic = state.automatic
         let ordinal = nativeSubtitleTrackTable.indices.first { index in
             let entry = nativeSubtitleTrackTable[index]
             guard let source = entry.sourceStreamIndex ?? entry.externalID else { return false }
             return selected?.hasMediaCharacteristic(.init(rawValue: NativeSubtitlePolicy.characteristic(source))) == true
         }
         let source = ordinal.flatMap { nativeSubtitleTrackTable[$0].sourceStreamIndex ?? nativeSubtitleTrackTable[$0].externalID }
+        if case let .preparing(baseline) = avKitSubtitleSelectionPhase {
+            // Audio changes and late acknowledgements of the prior choice do not relinquish
+            // preparation. An actual legible change does, even when it differs from our request.
+            guard state != baseline else { return }
+            nativeLegibleDeselectPinTask?.cancel()
+            avKitSubtitlePendingPolicy = nil
+        }
         if let pending = avKitSubtitlePendingPolicy {
+            let acknowledged: Bool
             switch pending {
-            case .automatic: guard automatic else { return }
-            case .off: guard !automatic, selected == nil else { return }
-            case let .track(expected): guard !automatic, source == expected else { return }
+            case .automatic: acknowledged = automatic
+            case .off: acknowledged = !automatic && selected == nil
+            case let .track(expected): acknowledged = !automatic && source == expected
+            }
+            if !acknowledged {
+                if case let .applying(baseline) = avKitSubtitleSelectionPhase, state == baseline { return }
+                nativeLegibleDeselectPinTask?.cancel()
             }
             avKitSubtitlePendingPolicy = nil
         }
+        avKitSubtitleSelectionPhase = nil
         recordNativeSubtitlePolicy(automatic ? .automatic : source.map { .track($0) } ?? .off)
         // Resolve the policy transaction even before readiness, so a subsequent manual choice
         // is accepted. An unresolved automatic group must not stop a demand-started source.

@@ -1510,7 +1510,7 @@ With `LoadOptions.prepareNativeSubtitles`, hosts can opt into `LoadOptions.nativ
 
 Current-item media selection activates only the selected reader/OCR worker. Off, replacement and stop retire obsolete work. Automatic criteria retain independently selected audio. Validated language, forced and explicit hearing-impaired characteristics make supported text and OCR renditions eligible for system preference selection; unknown metadata is omitted. This does not add a subtitle overlay or reproduce AVKit-only UI behavior.
 
-An explicit OCR source starts before its native option is selected. Selection waits for the worker's existing forward coverage or definitive completion, so AVPlayer does not retain an unrecognized window as empty subtitles. Recognition continues while paused without starting playback. Superseding choices, replacement and stop cancel the wait; no timer toggles the rendition or restarts playback. Automatic selection keeps its existing demand-driven activation.
+An explicit OCR source starts before its native option is selected. Selection waits for the worker's existing forward coverage or definitive completion, so AVPlayer does not retain an unrecognized window as empty subtitles. Recognition continues while paused without starting playback. Item selection observation stays active during preparation: a newer native track, Off or Automatic choice retires the pending wait and worker, while audio acknowledgements leave preparation intact. Replacement and stop also cancel the wait; no timer toggles the rendition or restarts playback. Automatic selection keeps its existing demand-driven activation.
 
 ### External subtitle request headers
 

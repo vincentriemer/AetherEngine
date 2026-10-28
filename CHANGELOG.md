@@ -30,6 +30,7 @@ the public-API contract.
 ### ATVPlayer subtitle activation
 
 - **Wait for OCR coverage before an explicit native selection.** A cold bitmap rendition could be selected before recognition filled its forward window, leaving AVPlayer with cached empty subtitle segments. Start the chosen OCR source first and keep playback transport unchanged while coverage fills. Off, repeated choices, item replacement and stop cancel obsolete waits, including cancellation before a completed store is examined.
+- Keep item-owned selection observation active during preparation. A newer native track, Off or Automatic choice retires the pending OCR transaction; audio acknowledgements and unchanged prior selections do not.
 
 ### ATVPlayer fork refresh — October 26, 2026
 
