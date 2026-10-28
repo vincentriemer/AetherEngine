@@ -89,6 +89,18 @@ extension AetherEngine {
                     self.recordNativeSubtitlePolicy(.off)
                     self.avKitSubtitlePendingPolicy = .off
                 }
+                // AVPlayer retains every subtitle segment fetched at selection. Arm OCR first
+                // and cover that burst before exposing the rendition, including while paused.
+                if option != nil, let ordinal = self.nativeSubtitleTrackTable.firstIndex(where: {
+                    ($0.sourceStreamIndex ?? $0.externalID) == source
+                }), self.nativeSubtitleTrackTable[ordinal].needsOCR,
+                   let store = self.nativeStore(atOrdinal: ordinal) {
+                    self.activateAVKitSubtitleSource(ordinal)
+                    let exit = await self.awaitSubtitleOCRCoverage(ordinal: ordinal, store: store, item: item)
+                    guard exit != "superseded", !Task.isCancelled,
+                          self.currentAVPlayer?.currentItem === item,
+                          self.loadedOptions.nativeSubtitlePolicy == .track(source) else { return }
+                }
                 item.select(option, in: group)
             }
             self.nativeLegibleDeselectPinItem = item

@@ -13,6 +13,7 @@ The production TrueHD path directly renders the exact object presentation with f
 - Opt-in AVKit subtitle policy and stable source identities; preserve automatic versus explicit intent and audio selection. Demand can start the selected text/OCR source before player readiness. Native-only playback avoids an overlay decoder, protects OCR lookahead and scopes text readers to the selected source.
 - Bound video-only intermediate muxer payloads at 8 MiB without changing complete samples, segment cuts, audio or disk-backed forward buffering. Preserve upstream stereo metadata and tail accounting for applicable stream types.
 - Background Vision scheduling and one-time cue-availability publication without reducing OCR quality.
+- Explicit OCR selections arm the source and wait for existing forward-window coverage before AVPlayer can fetch empty segments. Pending coverage waits honor cancellation without changing transport or automatic-caption preference semantics.
 
 The upstream native OCR activation is reused by the legacy selection path; it does not replace source identity, native-only ownership, early demand or automatic-selection policy.
 

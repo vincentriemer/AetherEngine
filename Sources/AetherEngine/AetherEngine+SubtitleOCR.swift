@@ -152,17 +152,19 @@ extension AetherEngine {
         let reportAt = Date().addingTimeInterval(Self.subtitleOCRPrefillReportSeconds)
         var reported = false
         while true {
+            guard !Task.isCancelled, nativeSubtitleReapplyOrdinal == ordinal,
+                  currentAVPlayer?.currentItem === item
+            else { return "superseded" }
             if store.isFinished { return "finished" }
             if subtitleOCRCoversNativeWindow(ordinal: ordinal) { return "covered" }
-            guard nativeSubtitleReapplyOrdinal == ordinal, currentAVPlayer?.currentItem === item
-            else { return "superseded" }
             if !reported, Date() >= reportAt {
                 reported = true
                 EngineLog.emit("[AetherEngine] native subtitle OCR pre-fill still waiting after "
                                + "\(Int(Self.subtitleOCRPrefillReportSeconds))s: "
                                + subtitleOCRCoverageState(ordinal: ordinal), category: .engine)
             }
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            do { try await Task.sleep(nanoseconds: 250_000_000) }
+            catch { return "superseded" }
         }
     }
 

@@ -27,6 +27,10 @@ the public-API contract.
 
 ## [Unreleased]
 
+### ATVPlayer subtitle activation
+
+- **Wait for OCR coverage before an explicit native selection.** A cold bitmap rendition could be selected before recognition filled its forward window, leaving AVPlayer with cached empty subtitle segments. Start the chosen OCR source first and keep playback transport unchanged while coverage fills. Off, repeated choices, item replacement and stop cancel obsolete waits, including cancellation before a completed store is examined.
+
 ### ATVPlayer fork refresh — October 26, 2026
 
 - Merge upstream 7.48.0. Use its direct TrueHD object renderer, full metadata mapping, interpolation defaults and removal of BedSplitter/reference rendering.

@@ -1506,9 +1506,12 @@ support this option. Physical Apple TV acceptance remains separate from syntheti
 
 With `LoadOptions.prepareNativeSubtitles`, hosts can opt into `LoadOptions.nativeSubtitleSelectionByAVKit`. The default remains false for existing overlay/PiP consumers. `LoadOptions.nativeSubtitlePolicy` starts at `NativeSubtitlePolicy.automatic`; `.off` and `.track(sourceID)` record explicit session choices. `setNativeSubtitlePolicy(_:)` restores that intent without forcing an automatic resolution into a manual track selection.
 
-`nativeSubtitleSelectionPolicy` reports session intent, while `nativeSubtitleResolvedOrdinal` reports the engine rendition currently selected by AVPlayer. `NativeSubtitleTrack.sourceID` is the source identity for policy; its `ordinal` is only the engine table position. Never match an AVFoundation option by language or list position in this mode: source characteristics are stable and same-language tracks can differ. Hosts may use the published distinct display names in a system transport menu when AVKit's built-in selector groups alternatives.
+`nativeSubtitleSelectionPolicy` reports session intent, while `nativeSubtitleResolvedOrdinal` reports the resolved engine source, including an explicit OCR source preparing its rendition. `NativeSubtitleTrack.sourceID` is the source identity for policy; its `ordinal` is only the engine table position. Never match an AVFoundation option by language or list position in this mode: source characteristics are stable and same-language tracks can differ. Hosts may use the published distinct display names in a system transport menu when AVKit's built-in selector groups alternatives.
 
 Current-item media selection activates only the selected reader/OCR worker. Off, replacement and stop retire obsolete work. Automatic criteria retain independently selected audio. Validated language, forced and explicit hearing-impaired characteristics make supported text and OCR renditions eligible for system preference selection; unknown metadata is omitted. This does not add a subtitle overlay or reproduce AVKit-only UI behavior.
+
+An explicit OCR source starts before its native option is selected. Selection waits for the worker's existing forward coverage or definitive completion, so AVPlayer does not retain an unrecognized window as empty subtitles. Recognition continues while paused without starting playback. Superseding choices, replacement and stop cancel the wait; no timer toggles the rendition or restarts playback. Automatic selection keeps its existing demand-driven activation.
+
 ### External subtitle request headers
 
 When an external subtitle has no explicit `httpHeaders`, media headers are inherited only if

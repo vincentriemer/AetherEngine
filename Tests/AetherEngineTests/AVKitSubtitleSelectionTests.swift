@@ -6,6 +6,26 @@ import Testing
 
 @MainActor @Suite("AVKit subtitle ownership", .serialized)
 struct AVKitSubtitleSelectionTests {
+    @Test(.timeLimit(.minutes(1))) func OCRCoverageWaitHonorsCancellationAndItemOwnership() async throws {
+        let engine = try AetherEngine()
+        defer { engine.stop() }
+        let item = AVPlayerItem(asset: AVMutableComposition())
+        engine.currentAVPlayer = AVPlayer(playerItem: item)
+        engine.nativeSubtitleReapplyOrdinal = 0
+        let store = NativeSubtitleCueStore()
+        var began = false
+        let wait = Task { @MainActor in
+            began = true
+            return await engine.awaitSubtitleOCRCoverage(ordinal: 0, store: store, item: item)
+        }
+        try await waitFor { began }
+        wait.cancel()
+        #expect(await wait.value == "superseded")
+        engine.currentAVPlayer?.replaceCurrentItem(with: AVPlayerItem(asset: AVMutableComposition()))
+        store.markFinished()
+        #expect(await engine.awaitSubtitleOCRCoverage(ordinal: 0, store: store, item: item) == "superseded")
+    }
+
     @Test func sourceOwnershipAndCleanup() throws {
         let engine = try AetherEngine()
         defer { engine.stop() }
@@ -83,6 +103,78 @@ struct AVKitSubtitleSelectionTests {
     }
 
     #if os(macOS)
+        @Test(.timeLimit(.minutes(1)), arguments: [false, true])
+        func explicitOCRWaitsForCoverageAndRetiresPendingChoices(playing: Bool) async throws {
+            let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let engine = try AetherEngine()
+            defer { engine.stop() }
+            var options = LoadOptions()
+            options.nativeSubtitleSelectionByAVKit = true
+            options.nativeSubtitlePolicy = .off
+            engine.setLoadedOptionsForTesting(options)
+            engine.loadedURL = URL(fileURLWithPath: "/synthetic.mkv")
+            engine.nativeSubtitleTrackTable = [
+                .init(sourceStreamIndex: 41, language: "en", needsOCR: true),
+                .init(sourceStreamIndex: 77, language: "ja", needsOCR: true),
+            ]
+            let stores = [NativeSubtitleCueStore(), NativeSubtitleCueStore()]
+            engine.testHookNativeStores = stores
+            let session = HLSVideoEngine(url: root.appendingPathComponent("Fixtures/native-audio-tracks.mkv"), dvModeAvailable: false)
+            session.enableNativeSubtitleTrackForSession = true
+            session.nativeSubtitleRenditionInfosForSession = AetherEngine.nativeSubtitleRenditionInfos(for: engine.nativeSubtitleTrackTable, avKitOwned: true)
+            session.nativeSubtitleLanguagesForSession = ["en", "ja"]
+            session.nativeSubtitleCueStoresForSession = stores
+            engine.nativeVideoSession = session
+            let url = try await BlockingWork.detached { try session.start() }.value
+            defer { session.stop() }
+            let item = AVPlayerItem(url: url)
+            let player = AVPlayer()
+            player.isMuted = true
+            engine.currentAVPlayer = player
+            player.replaceCurrentItem(with: item)
+            let output = AVPlayerItemLegibleOutput()
+            let sink = SubtitleOutputSink()
+            output.setDelegate(sink, queue: .main)
+            item.add(output)
+            let group = try #require(try await item.asset.loadMediaSelectionGroup(for: .legible))
+            try await waitFor { engine.nativeLegibleDeselectPinObserver != nil && engine.avKitSubtitlePendingPolicy == nil }
+            #expect(item.currentMediaSelection.selectedMediaOption(in: group) == nil)
+            if playing { player.play() }
+
+            engine.setNativeSubtitlePolicy(.track(41))
+            try await waitFor { engine.subtitleOCRArmedOrdinal == 0 }
+            // Recognition has not covered the selection burst. Selecting now lets AVPlayer
+            // fetch and retain empty VTT segments, even though the worker is running.
+            #expect(item.currentMediaSelection.selectedMediaOption(in: group) == nil)
+            let abandoned = try #require(engine.nativeLegibleDeselectPinTask)
+            let worker = try #require(engine.subtitleOCRWorkerTask)
+            engine.setNativeSubtitlePolicy(.off)
+            await abandoned.value
+            #expect(worker.isCancelled)
+            #expect(engine.subtitleOCRWorkerTask == nil)
+
+            engine.setNativeSubtitlePolicy(.track(77))
+            try await waitFor { engine.subtitleOCRArmedOrdinal == 1 }
+            #expect(item.currentMediaSelection.selectedMediaOption(in: group) == nil)
+            let superseded = try #require(engine.nativeLegibleDeselectPinTask)
+            engine.setNativeSubtitlePolicy(.track(77))
+            await superseded.value
+            #expect(engine.subtitleOCRArmedOrdinal == 1, "Repeating a pending choice keeps its worker")
+            stores[0].appendCues([.init(id: 0, startTime: 0, endTime: 20, body: .text("Retired OCR"))])
+            stores[0].markFinished()
+            stores[1].appendCues([.init(id: 1, startTime: 0, endTime: 20, body: .text("Ready OCR"))])
+            stores[1].markFinished()
+            try await waitFor { engine.avKitSubtitlePendingPolicy == nil && item.currentMediaSelection.selectedMediaOption(in: group) != nil }
+            let selected = try #require(item.currentMediaSelection.selectedMediaOption(in: group))
+            #expect(selected.hasMediaCharacteristic(.init(rawValue: NativeSubtitlePolicy.characteristic(77))))
+            #expect(engine.nativeSubtitleSelectionPolicy == .track(77))
+            #expect(engine.activeSubtitleTrackIndex == 77)
+            #expect(player.rate == (playing ? 1 : 0), "Enabling subtitles must preserve transport intent")
+            if playing {
+                try await waitFor { sink.texts.withLock { $0.contains(where: { $0.contains("Ready OCR") }) } }
+            }
+        }
+
         @Test(.timeLimit(.minutes(1))) func automaticEmptyRenditionStartsItsSourceBeforeReadiness() async throws {
             let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             let engine = try AetherEngine()
@@ -104,6 +196,7 @@ struct AVKitSubtitleSelectionTests {
             defer { session.stop() }
             let item = AVPlayerItem(url: url)
             let player = AVPlayer()
+            player.isMuted = true
             player.setMediaSelectionCriteria(.init(preferredLanguages: ["en"], preferredMediaCharacteristics: nil), forMediaCharacteristic: .legible)
             engine.currentAVPlayer = player
             player.replaceCurrentItem(with: item)
@@ -265,6 +358,7 @@ struct AVKitSubtitleSelectionTests {
             defer { session.stop() }
             let item = AVPlayerItem(url: url)
             let player = AVPlayer(playerItem: item)
+            player.isMuted = true
             defer { player.pause(); player.replaceCurrentItem(with: nil) }
             let output = AVPlayerItemLegibleOutput()
             let sink = SubtitleOutputSink()
