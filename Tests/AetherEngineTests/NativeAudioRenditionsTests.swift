@@ -10,6 +10,21 @@ struct NativeAudioRenditionsTests {
         TrackInfo(id: 7, name: "Commentary", codec: "ac3", language: "eng", channels: 6, isDefault: false),
         TrackInfo(id: 11, name: "German", codec: "aac", language: "deu", channels: 2, isDefault: false),
     ]
+    @Test("Spatial rendition codecs match the requested bed format without opening a pipeline",
+          arguments: [ObjectAudioRendering.apac(.l714), .lpcm(.l714)])
+    func spatialManifest(rendering: ObjectAudioRendering) {
+        let track = TrackInfo(id: 31, name: "English Atmos", codec: "truehd", language: "eng", channels: 8, isDefault: true)
+        let rendition = NativeAudioRenditions(tracks: [track], names: [:], initial: 31, plan: [],
+            rendering: rendering, makeSession: { _, _ in
+                Issue.record("manifest opened a spatial pipeline")
+                throw CancellationError()
+            }, activated: { _, _ in Issue.record("manifest activated audio") })
+        defer { rendition.stop() }
+        let expected = rendering == .lpcm(.l714) ? "ipcm" : APACSampleEntry.codecsString(channelCount: 12)
+        #expect(rendition.codecs.contains(expected))
+        #expect(rendition.mediaTags[0].contains("audio_31/media.m3u8"))
+    }
+
     @Test("Manifest names and language alternatives retain container identities without opening readers")
     func lazyManifest() {
         let rendition = NativeAudioRenditions(tracks: tracks,

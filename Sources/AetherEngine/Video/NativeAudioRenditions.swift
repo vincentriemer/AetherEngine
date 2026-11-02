@@ -50,7 +50,8 @@ final class NativeAudioRenditions: @unchecked Sendable {
             if ["truehd", "dts"].contains(track.codec), !losslessTracks.contains(track.id),
                ObjectAudioRendering.isAvailable, let layout = rendering.layout
             {
-                codecs.append(APACSampleEntry.codecsString(channelCount: layout.channelCount))
+                let format = rendering.bedFormat(routeFormat: SpatialBedFormat.forCurrentRoute())
+                codecs.append(format == .lpcm ? "ipcm" : APACSampleEntry.codecsString(channelCount: layout.channelCount))
                 // Decoder/encoder availability is resolved lazily; do not claim an output layout here.
                 channels = nil
             }
