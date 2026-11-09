@@ -23,6 +23,9 @@ final class SoftwarePlaybackHost {
     nonisolated static func presentationReorderDepth(codecID: UInt32) -> Int? {
         switch codecID {
         case AV_CODEC_ID_H264.rawValue, AV_CODEC_ID_HEVC.rawValue, AV_CODEC_ID_VC1.rawValue: return 32
+        // WMV1/2 decode only I/P pictures (FFmpeg msmpeg4dec.c / wmv2dec.c): no B reorder.
+        // Still hold one successor; never invent the last picture's presentation duration.
+        case AV_CODEC_ID_WMV1.rawValue, AV_CODEC_ID_WMV2.rawValue: return 1
         default: return nil
         }
     }
@@ -295,8 +298,8 @@ final class SoftwarePlaybackHost {
     private var audioDecoder: (any SoftwareAudioProducing)?
     /// How this session's audio reaches the renderer (`SoftwareAtmosRoute`), for the logs and the tests.
     private(set) var audioRoute: SoftwareAtmosRoute = .pcm
-    /// The route carries Dolby Atmos (`SoftwareAtmosRoute.carriesDolbyAtmos`), for `AtmosOutputActivator`.
-    private(set) var audioRouteCarriesDolbyAtmos = false
+    /// The route needs `AtmosOutputActivator` (`SoftwareAtmosRoute.takesAtmosOutputActivator`).
+    private(set) var audioRouteTakesAtmosActivator = false
     /// The host's object-audio setting, set before `load`. Anything but `.off` lets Atmos tracks reach
     /// the renderer as Atmos instead of as the PCM decode of their core.
     var objectAudioRendering: ObjectAudioRendering = .off
@@ -310,6 +313,8 @@ final class SoftwarePlaybackHost {
     private var audioOutput: AudioOutput?
     private var demuxer: Demuxer?
     private var vodPacketReadAhead: SoftwarePacketReadAhead?
+    /// Forward-only ordinary Live source; held until both source and parked-video cleanup finish.
+    private var directLiveReadAhead: DirectLiveAudioReadAhead?
     /// #687: this host's entries in the process-wide retention ledger, released on `stop()`.
     private var retentionClaims: [RetentionClaims.Claim] = []
     @Published private(set) var residentRanges: [ClosedRange<Double>] = []
@@ -469,7 +474,8 @@ final class SoftwarePlaybackHost {
 
     /// Same construction path for the live decoder and controlled-source contract fixtures.
     @discardableResult
-    func prepareLiveDVR(windowSeconds window: Double, retention: SoftwareDVRRetentionOptions? = nil) -> PacketRingBuffer? {
+    func prepareLiveDVR(windowSeconds window: Double, retention: SoftwareDVRRetentionOptions? = nil,
+                        requestedBytes: Int? = nil) -> PacketRingBuffer? {
         let base = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("aether-segments", isDirectory: true)
         let scratch = base.appendingPathComponent("dvr-\(UUID().uuidString)", isDirectory: true)
@@ -479,7 +485,7 @@ final class SoftwarePlaybackHost {
             let available = (try? base.resourceValues(forKeys: [.volumeAvailableCapacityKey]))?
                 .volumeAvailableCapacity.map(Int64.init)
             let claim = RetentionClaims.shared.claim(volumeAvailableBytes: available) {
-                PacketRingBuffer.liveByteBudget(volumeAvailableBytes: $0)
+                PacketRingBuffer.liveByteBudget(volumeAvailableBytes: $0, requestedBytes: requestedBytes)
             }
             let budget = claim.bytes
             let ring = try PacketRingBuffer(windowSeconds: window, scratch: scratch,
@@ -1037,7 +1043,7 @@ final class SoftwarePlaybackHost {
         switch route {
         case .pcm: return .decoded
         case .compressedEAC3JOC: return .streamCopy
-        case .apac, .pcmBed: return .bridged
+        case .apac, .pcmBed, .decodedEAC3JOC: return .bridged
         }
     }
 
@@ -1101,6 +1107,17 @@ final class SoftwarePlaybackHost {
             lastFedAudioPTS: lastAudioPts,
             clockSeconds: clockSeconds
         ) == .stop
+    }
+
+    /// Waits for space before parking another packet. An indivisible oversized packet is admitted
+    /// alone, then the normal read gate stops further accumulation until it drains.
+    nonisolated static func shouldWaitForLivePacketCapacity(
+        parkedBytes: Int,
+        packetBytes: Int,
+        byteLimit: Int
+    ) -> Bool {
+        if parkedBytes == 0 { return false }
+        return packetBytes > byteLimit || parkedBytes > byteLimit - packetBytes
     }
 
     /// How long the parked demux loop waits before it re-checks the renderer, in seconds. The renderer
@@ -1194,7 +1211,8 @@ final class SoftwarePlaybackHost {
         #if !targetEnvironment(simulator)
         if #available(tvOS 26, iOS 26, macOS 26, visionOS 26, *) {
             let interval = frameRate.flatMap { $0.isFinite && $0 > 0 ? 1 / $0 : nil } ?? 1.0 / 25
-            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval) else { return handler }
+            guard let stage = FrameUpscaler(plan: plan, frameInterval: interval, buildQueue: FrameUpscaler.stageBuildQueue)
+            else { return handler }
             frameUpscaler = stage
             return UpscalingFrameHandler.wrap(handler) { stage.upscale($0, pts: $1) }
         }
@@ -1211,6 +1229,7 @@ final class SoftwarePlaybackHost {
         isLive: Bool = false,
         dvrWindowSeconds: Double? = nil,
         dvrRetention: SoftwareDVRRetentionOptions? = nil,
+        liveDVRByteBudget: Int? = nil,
         forwardBufferSegments: Int? = nil,
         packetCacheStorage: SoftwarePacketCacheStorage = .automatic,
         sessionCacheByteBudget: Int? = nil
@@ -1236,7 +1255,8 @@ final class SoftwarePlaybackHost {
 
         dvrRingHoldsCushionOnly = false
         if isLive, let window = dvrWindowSeconds {
-            _ = prepareLiveDVR(windowSeconds: window, retention: dvrRetention)
+            _ = prepareLiveDVR(windowSeconds: window, retention: dvrRetention,
+                               requestedBytes: liveDVRByteBudget)
         } else if isLive, let cushion = LiveEdgePolicy.edgeCushion(liveEdgeCushionSeconds) {
             // The plain live feeder plays packets as the demuxer reads them, so there is nothing to
             // play behind. A ring as deep as the loopback's cushion window gives the join one.
@@ -1283,6 +1303,8 @@ final class SoftwarePlaybackHost {
                elType: elType,
                preferDualLayerDolbyVision: preferDualLayerDolbyVision,
                dolbyVisionHandling: dolbyVisionHandling) {
+            // A split source's enhancement layer joins the video packets (a no-op once the load joined it).
+            dem.enableDolbyVisionEnhancementLayerJoin()
             let vIdx = dem.videoStreamIndex
             await BlockingWork.detached(priority: .userInitiated) {
                 _ = VideoConfigRecord.completeHEVCRecordFromInBandParameterSets(demuxer: dem, streamIndex: vIdx)
@@ -1508,7 +1530,7 @@ final class SoftwarePlaybackHost {
                 self.audioDecoder = made.producer
                 self.audioShapingApplied = audioShaping.isActive && made.route == .pcm
                 self.audioRoute = made.route
-                self.audioRouteCarriesDolbyAtmos = made.route.carriesDolbyAtmos(sourceCodec: acp.pointee.codec_id)
+                self.audioRouteTakesAtmosActivator = made.route.takesAtmosOutputActivator
                 self.audioStreamIndex = resolvedAudioIdx
                 let atb = aStream.pointee.time_base
                 self.audioTimeBaseSeconds = atb.den > 0 ? Double(atb.num) / Double(atb.den) : 0
@@ -1685,6 +1707,27 @@ final class SoftwarePlaybackHost {
             readAhead?.start()
         }
 
+        if isLive, dvrRing == nil, audioDecoder != nil {
+            let videoIndex = videoStreamIndex
+            let audioIndex = audioStreamIndex
+            let result = await BlockingWork.detached(priority: .userInitiated) {
+                try DirectLiveAudioReadAhead(
+                    demuxer: dem, videoIndex: videoIndex, audioIndex: audioIndex
+                )
+            }.result
+            let source: DirectLiveAudioReadAhead?
+            switch result {
+            case .success(let readAhead):
+                source = readAhead
+            case .failure:
+                EngineLog.emit("[SWHost] live read-ahead unavailable; retaining direct playback", category: .swPlayback)
+                source = nil
+            }
+            guard !stopRequested, !Task.isCancelled else { source?.close(); return }
+            directLiveReadAhead = source
+            source?.packets.start()
+        }
+
         // The Atmos decoder registration started when the route was chosen and has run alongside the
         // resume seek and the cache setup; only what is left of its window is waited out here, and
         // only on the compressed-JOC route (`AtmosDecoderPrimer`). The first enqueue is after load().
@@ -1700,7 +1743,7 @@ final class SoftwarePlaybackHost {
 
     /// Waits for the registration on the route that needs it and never on any other.
     static func awaitAtmosPrimer(for route: SoftwareAtmosRoute, wait: @MainActor () async -> Void) async {
-        guard route == .compressedEAC3JOC else { return }
+        guard route.needsAtmosDecoder else { return }
         await wait()
     }
 
@@ -1732,13 +1775,7 @@ final class SoftwarePlaybackHost {
         case .none:
             break
         }
-        if !demuxLoopStarted, let aOut = audioOutput {
-            aOut.attachVideoLayer(renderer.displayLayer)
-        }
-        if !demuxLoopStarted {
-            demuxLoopStarted = true
-            startDemuxLoop()
-        }
+        startLoopsIfNeeded()
         // Cold start: demux loop arms the clock on first decoded audio sample; don't eager-start.
         rate = lastRate
         isPlaying = true
@@ -1783,6 +1820,7 @@ final class SoftwarePlaybackHost {
         return EmbeddedSubtitleDecoder(stream: stream,
                                        sourceVideoWidth: w > 0 ? w : 1920,
                                        sourceVideoHeight: h > 0 ? h : 1080,
+                                       sourceIsPQ: vpar?.pointee.color_trc == AVCOL_TRC_SMPTE2084,
                                        preserveASSMarkup: preserveASSMarkupForSubtitleTap,
                                        teletextPage: teletextPageForSubtitleTap)
     }
@@ -1861,16 +1899,28 @@ final class SoftwarePlaybackHost {
         audioOutput?.setPlaybackEnabled(false)
         pausedByHost = true
         rate = 0
-        if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued),
+        let startsLoops = PausedFirstFrame.startsLoopsForFirstFrame(
+            loaded: isReady && failure == nil, loopsStarted: demuxLoopStarted)
+        if PausedFirstFrame.holdsForFirstFrame(loopsStarted: demuxLoopStarted, framesEnqueued: framesEnqueued)
+            || startsLoops,
            !stopRequested {
             pausedBeforeFirstFrame = true
             EngineLog.emit(
-                "[SWHost] #104 paused before the first frame: the loops keep reading at a stopped clock until it presents",
+                "[SWHost] #104 paused before the first frame: the loops keep reading at a stopped clock until it presents"
+                + (startsLoops ? " (AE#973: started for it, nothing had played this host)" : ""),
                 category: .swPlayback
             )
         }
         isPlaying = false
         inFlightSeekResumeIntent = false
+        if startsLoops, !stopRequested { startLoopsIfNeeded() }
+    }
+
+    private func startLoopsIfNeeded() {
+        guard !demuxLoopStarted else { return }
+        audioOutput?.attachVideoLayer(renderer.displayLayer)
+        demuxLoopStarted = true
+        startDemuxLoop()
     }
 
     /// Sodalite#104 round 4: the first frame of a session paused before it is in. Moves the stopped clock
@@ -2181,6 +2231,12 @@ final class SoftwarePlaybackHost {
     var videoQueueFlushOwedForTesting: Bool { videoQueueFlushOwed }
     var audioRendererForTesting: AVSampleBufferAudioRenderer? { audioOutput?.renderer }
     var videoRendererForTesting: SampleBufferRenderer { renderer }
+    /// Exposes source ownership for bounded-buffer and DVR-routing regressions.
+    var directLiveReadAheadForTesting: DirectLiveAudioReadAhead? { directLiveReadAhead }
+    /// Observes successful renderer delivery; install before playback and never reenter the output.
+    func observeDeliveredAudioForTesting(_ observer: @escaping @Sendable () -> Void) {
+        audioOutput?.afterRendererEnqueueForTesting = observer
+    }
     var keyframeLedgerForTesting: SWKeyframeLedger { keyframeLedger }
     func setLiveForTesting(_ live: Bool) { isLive = live }
     func setVideoDecoderForTesting(_ decoder: any VideoDecodingPipeline) { videoDecoder = decoder }
@@ -2195,6 +2251,8 @@ final class SoftwarePlaybackHost {
         demuxDiag.update(lastAudioPts: pts, parked: 0, rebuffering: false, generation: seekGeneration)
     }
     var audioFedUntilForTesting: Double { demuxDiag.snapshot.lastAudioPts }
+    /// Reads the consumer's published queue depth without accessing its thread-owned packets.
+    var parkedVideoCountForTesting: Int { demuxDiag.snapshot.parked }
     var recoveryPendingForTesting: Bool { flushRecoveryPending }
     func setRepositionBackoffForTesting(_ seconds: Double) { repositionBackoffSeconds = seconds }
     var audioAutomaticFlushCountForTesting: Int? { audioOutput?.automaticFlushCount }
@@ -2764,6 +2822,8 @@ final class SoftwarePlaybackHost {
         residentRanges = []
         vodPacketReadAhead?.close()
         vodPacketReadAhead = nil
+        directLiveReadAhead?.close()
+        directLiveReadAhead = nil
         renderer.subtitleCompositor.reset()
 
         if let extractor = stillExtractorSlot.reset() {
@@ -3048,11 +3108,13 @@ final class SoftwarePlaybackHost {
 
         let diag = demuxDiag
         let keyframeLedger = keyframeLedger
-        let readAhead = vodPacketReadAhead
+        let directLiveSource = directLiveReadAhead
+        let readAhead = directLiveSource?.packets ?? vodPacketReadAhead
         demuxQueue.async {
             Self.runDemuxLoop(
                 demuxer: dem,
                 readAhead: readAhead,
+                directLiveSource: directLiveSource,
                 videoDecoder: vDec,
                 videoStreamIndex: vIdx,
                 audioDecoder: aDec,
@@ -3767,6 +3829,7 @@ final class SoftwarePlaybackHost {
     nonisolated private static func runDemuxLoop(
         demuxer: Demuxer,
         readAhead: SoftwarePacketReadAhead?,
+        directLiveSource: DirectLiveAudioReadAhead?,
         videoDecoder: any VideoDecodingPipeline,
         videoStreamIndex: Int32,
         audioDecoder: (any SoftwareAudioProducing)?,
@@ -3846,7 +3909,7 @@ final class SoftwarePlaybackHost {
         var frameIntervalSec = 0.0
         var discontinuityOffsetSec = 0.0
         var loggedSeamCount = 0
-        let replayReader = isLive ? LiveReplayPacketReader(videoIndex: videoStreamIndex,
+        let replayReader = isLive && directLiveSource == nil ? LiveReplayPacketReader(videoIndex: videoStreamIndex,
             audioIndex: audioStreamIndex, videoTimeBase: videoTimeBaseSeconds,
             audioTimeBase: audioTimeBaseSeconds) : nil
         var replayGeneration = seekGeneration()
@@ -3876,11 +3939,13 @@ final class SoftwarePlaybackHost {
         // drops). Video packets now PARK in a bounded FIFO while audio keeps decoding up to
         // AudioLookaheadPolicy.targetLeadSeconds ahead of the clock, and a genuine underrun
         // pauses the clock for a rebuffer (AudioLookaheadPolicy.clockAction) instead of
-        // letting it free-run, mirroring the DVR feeder arm. Live sessions keep the historical
-        // lockstep pacing: their delivery is origin-paced realtime, and the ones that need a
-        // pump get it from the DVR feeder arm on its own thread.
+        // letting it free-run, mirroring the DVR feeder arm. Ordinary Live also parks video,
+        // but never pauses its clock for rebuffering. Its forward-only producer keeps already
+        // parked video runnable while source I/O waits; DVR retains its separate feeder.
         var parkedVideo: [UnsafeMutablePointer<AVPacket>] = []
         let parkedVideoCap = 256
+        /// Compressed allocation cost; the Live limit includes side data and packet headers.
+        var parkedVideoBytes = 0
         var terminalGeneration = SoftwareTerminalGeneration()
         var lastEnqueuedAudioPtsSec = Double.nan
         var rebuffering = false
@@ -3889,7 +3954,7 @@ final class SoftwarePlaybackHost {
         // not eat a rebuffer pause at every session start.
         var everHadLead = false
         var parkedSeekGeneration = seekGeneration()
-        let decoupleAudio = !isLive && audioDecoder != nil && audioOutput != nil
+        let decoupleAudio = (!isLive || directLiveSource != nil) && audioDecoder != nil && audioOutput != nil
         // AE#395: the diagnostic line's audio marker, written on every route. `lastEnqueuedAudioPtsSec`
         // is the pacing input and only exists where audio is decoupled, so a live session's line read
         // `aLead=-` throughout, on exactly the sessions where the lead decides whether a long-latency
@@ -3903,6 +3968,7 @@ final class SoftwarePlaybackHost {
                 av_packet_free_safe(p)
             }
             parkedVideo.removeAll()
+            parkedVideoBytes = 0
             keyframeLedger?.discardPending()
         }
 
@@ -3945,6 +4011,7 @@ final class SoftwarePlaybackHost {
                 // once it has read the new generation.
                 if seekGeneration() != parkedSeekGeneration { return }
                 let p = parkedVideo.removeFirst()
+                if directLiveSource != nil { parkedVideoBytes -= DirectLiveAudioReadAhead.packetBytes(p) }
                 let verdict = recoveryGate(p)
                 if verdict != .drop {
                     setDecodeGeneration(parkedSeekGeneration)
@@ -3954,6 +4021,8 @@ final class SoftwarePlaybackHost {
                 }
                 av_packet_unref(p)
                 av_packet_free_safe(p)
+                // One synchronous video decode/filter per turn leaves available audio a turn too.
+                if directLiveSource != nil { return }
             }
         }
 
@@ -3989,6 +4058,8 @@ final class SoftwarePlaybackHost {
         enum ParkWait {
             /// Hold the read until audio is back under its lead target / the FIFO under its cap.
             case readGate
+            /// Retain the already-read packet until its allocation fits, without dropping it.
+            case packetCapacity(Int)
             /// Feed the whole parked tail out (seam flush, end of media).
             case drainAll
         }
@@ -4001,10 +4072,19 @@ final class SoftwarePlaybackHost {
             func stillWaiting() -> Bool {
                 switch reason {
                 case .readGate:
+                    if let directLiveSource, parkedVideoBytes >= directLiveSource.parkedByteLimit { return true }
                     return Self.shouldHoldDemuxRead(
                         parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
                         clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
                         clockSeconds: audioOutput?.currentTimeSeconds ?? .nan)
+                case .packetCapacity(let bytes):
+                    return directLiveSource.map {
+                        Self.shouldWaitForLivePacketCapacity(
+                            parkedBytes: parkedVideoBytes,
+                            packetBytes: bytes,
+                            byteLimit: $0.parkedByteLimit
+                        )
+                    } ?? false
                 case .drainAll:
                     return !parkedVideo.isEmpty
                 }
@@ -4048,7 +4128,7 @@ final class SoftwarePlaybackHost {
         // everHadLead latch keeps that from firing on realtime-paced sources that never had
         // a lead to lose.
         func applyAudioClockAction() {
-            guard decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
+            guard !isLive, decoupleAudio, clockArmed(), let aOut = audioOutput else { return }
             let lead = lastEnqueuedAudioPtsSec.isFinite
                 ? lastEnqueuedAudioPtsSec - aOut.currentTimeSeconds : 0
             if lead >= AudioLookaheadPolicy.rebufferResumeLeadSeconds { everHadLead = true }
@@ -4146,18 +4226,27 @@ final class SoftwarePlaybackHost {
                     // keeping it set pauses the clock for a rebuffer on the first post-seek check.
                     everHadLead = false
                 }
-                drainParkedVideoNonblocking()
-                applyAudioClockAction()
-                // Read gate: stop pulling once decoded audio holds its target lead. The FIFO cap
-                // is the memory backstop, not the pacing rule - what bounds the lead has to be
-                // the lead itself, or the effective ceiling becomes "however many seconds of
-                // video fit in 256 packets" and moves with frame rate.
-                if Self.shouldHoldDemuxRead(
-                    parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
-                    clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
-                    clockSeconds: audioOutput?.currentTimeSeconds ?? .nan) {
-                    waitForRenderer(.readGate)
-                    return true
+                if backgroundAudioOnly() {
+                    // A full parked queue cannot drain off-screen. Retire it before any read gate,
+                    // then let the audio branch below pace on its own renderer. Applying the
+                    // foreground gate here would repeatedly return from a wait that background skips.
+                    freeParkedVideo()
+                    releaseRebufferHold("background audio-only uses audio renderer pacing")
+                } else {
+                    drainParkedVideoNonblocking()
+                    applyAudioClockAction()
+                    // Read gate: stop pulling once decoded audio holds its target lead. The FIFO cap
+                    // is the memory backstop, not the pacing rule - what bounds the lead has to be
+                    // the lead itself, or the effective ceiling becomes "however many seconds of
+                    // video fit in 256 packets" and moves with frame rate.
+                    if (directLiveSource.map { parkedVideoBytes >= $0.parkedByteLimit } ?? false)
+                        || Self.shouldHoldDemuxRead(
+                        parkedCount: parkedVideo.count, parkedCap: parkedVideoCap,
+                        clockArmed: clockArmed(), lastAudioPts: lastEnqueuedAudioPtsSec,
+                        clockSeconds: audioOutput?.currentTimeSeconds ?? .nan) {
+                        waitForRenderer(.readGate)
+                        return true
+                    }
                 }
             }
 
@@ -4174,7 +4263,18 @@ final class SoftwarePlaybackHost {
             let packet: UnsafeMutablePointer<AVPacket>?
             do {
                 if let readAhead {
-                    packet = try readAhead.read(isCurrent: { admitsRead(genBeforeRead) })?.makeAVPacket()
+                    let readyVideo = parkedVideo.first.map { mayDecodeVideoPacket($0) } ?? false
+                    if directLiveSource != nil {
+                        // The empty-source wait may last indefinitely; publish the final drain
+                        // before sleeping so SWDiag does not retain an already-consumed packet.
+                        diag?.update(lastAudioPts: diagAudioPtsSec, parked: parkedVideo.count,
+                                     rebuffering: false, generation: diagAudioPtsGeneration)
+                    }
+                    packet = try readAhead.read(
+                        isCurrent: { admitsRead(genBeforeRead) },
+                        maximumWait: directLiveSource == nil || parkedVideo.isEmpty
+                            ? nil : (readyVideo ? 0 : 0.01)
+                    )?.makeAVPacket()
                 } else {
                     if replayGeneration != genBeforeRead {
                         replayReader?.reset()
@@ -4194,6 +4294,11 @@ final class SoftwarePlaybackHost {
                 // captured host generation, just like packets and EOF.
                 guard admitsRead(genBeforeRead) else { return !stopRequested() }
                 if case SoftwarePacketReadAhead.ReadError.interrupted = error { return true }
+                if case SoftwarePacketReadAhead.ReadError.idle = error {
+                    diag?.update(lastAudioPts: diagAudioPtsSec, parked: parkedVideo.count,
+                                 rebuffering: false, generation: diagAudioPtsGeneration)
+                    return true
+                }
                 EngineLog.emit("[SWHost] demux read failed: \(error)", category: .swPlayback)
                 if terminalGeneration.record(genBeforeRead) {
                     onError("Playback error: \(error.localizedDescription)", genBeforeRead)
@@ -4389,6 +4494,17 @@ final class SoftwarePlaybackHost {
                 if decoupleAudio {
                     // Park; the drains at the iteration top and the bounded-park gate feed the
                     // renderer. Ownership moves to the FIFO - no free here.
+                    if directLiveSource != nil {
+                        let bytes = DirectLiveAudioReadAhead.packetBytes(packet)
+                        waitForRenderer(.packetCapacity(bytes))
+                        // A capacity wait can cross stop, foreground or generation changes.
+                        guard admitsRead(genBeforeRead), !backgroundAudioOnly() else {
+                            av_packet_unref(packet)
+                            av_packet_free_safe(packet)
+                            return !stopRequested()
+                        }
+                        parkedVideoBytes += bytes
+                    }
                     noteVideoPacketParked(packet)
                     parkedVideo.append(packet)
                     // Broken-audio clock-arming fallback still applies (decoupleAudio only
@@ -4637,6 +4753,7 @@ final class SoftwarePlaybackHost {
                 if !self.isLive, !self.clockArmed { return }
                 if raw.isFinite, raw >= 0 {
                     self.vodPacketReadAhead?.updatePlayhead(raw)
+                    self.directLiveReadAhead?.packets.updatePlayhead(raw)
                     // Raw clock = source/subtitle axis; published alongside the mapped position (#107).
                     self.sourceClockSeconds = raw
                     // Live: subtract sessionStartPts to convert to "seconds since first frame"; VOD
